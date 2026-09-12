@@ -95,6 +95,19 @@ def login():
     return jsonify(client.login(username, password))
 
 
+@app.post("/api/login-session")
+def login_session():
+    """Sign in by adopting a browser session cookie, skipping password login."""
+    payload = request.get_json(silent=True) or {}
+    return jsonify(
+        client.login_with_session_cookie(
+            sessionid=payload.get("sessionid") or "",
+            username=(payload.get("username") or "").strip(),
+            csrftoken=payload.get("csrftoken") or "",
+        )
+    )
+
+
 @app.post("/api/two-factor")
 def two_factor():
     payload = request.get_json(silent=True) or {}

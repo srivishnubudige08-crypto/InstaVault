@@ -34,6 +34,33 @@
                autocomplete="current-password" placeholder="Leave blank to reuse a saved session">
       </label>
       <button type="submit" class="btn primary block" id="login-submit">Sign in</button>
+      <button type="button" class="link-btn centered" id="show-session-form">
+        Instagram blocking this login? Use a browser session
+      </button>
+    </form>
+
+    <form id="session-form" class="auth-form" hidden>
+      <p class="auth-note">
+        Instagram trusts a session that already exists. Copy one from a browser
+        where you're signed in - no password login, so nothing to challenge.
+      </p>
+      <ol class="steps">
+        <li>Open <code>instagram.com</code> in your browser, signed in.</li>
+        <li>Press <kbd>F12</kbd> → <strong>Application</strong> (Firefox: <strong>Storage</strong>) → <strong>Cookies</strong> → <code>https://www.instagram.com</code>.</li>
+        <li>Find the row named <code>sessionid</code> and copy its <strong>Value</strong>.</li>
+      </ol>
+      <label>
+        <span>sessionid cookie</span>
+        <input name="sessionid" id="session-id" placeholder="12345678%3AAbCdEf..." required>
+      </label>
+      <button type="submit" class="btn primary block" id="session-submit">Use this session</button>
+      <button type="button" class="link-btn centered" id="show-login-form">
+        Back to password sign-in
+      </button>
+      <p class="auth-warn">
+        This value is as powerful as your password — it signs in as you. Keep it
+        to this app; don't paste it into a chat, an issue, or anywhere online.
+      </p>
     </form>
 
     <form id="twofa-form" class="auth-form" hidden>

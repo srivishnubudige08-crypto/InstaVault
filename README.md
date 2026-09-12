@@ -47,6 +47,14 @@ activated shell, use `.\venv\Scripts\Activate.ps1`.
 
 1. **Sign in.** Password login, with a two-factor step if your account has it.
    The session is cached, so later launches skip straight past this.
+
+   If Instagram answers with *"wants you to verify this login"*, it has flagged
+   the password login rather than your credentials — this is common, and
+   retrying rarely helps. Use **browser session** sign-in instead: copy the
+   `sessionid` cookie from a browser where you're already signed in
+   (`F12` → Application/Storage → Cookies → `instagram.com`) and paste it in.
+   Instagram already trusts that session, so there is nothing to challenge.
+   Treat that value like a password — it authenticates as you.
 2. **Sync saved.** Walks your Saved feed and indexes it locally. Nothing is
    downloaded yet — this just builds the library so you can browse offline.
 3. **Pick and download.** Click cards to select (or `Select all matching` to

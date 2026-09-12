@@ -4,6 +4,7 @@ const $ = (id) => document.getElementById(id);
 
 const state = {
   auth: { authenticated: false, username: "", awaiting_two_factor: false },
+  authMode: "password", // password | session
   filters: { search: "", kind: "all", state: "all", collection: "", sort: "newest" },
   items: [],
   selected: new Set(),
@@ -103,9 +104,14 @@ function renderAuth() {
   $("auth-screen").hidden = authenticated;
   $("app").hidden = !authenticated;
 
-  $("login-form").hidden = awaiting_two_factor;
-  $("twofa-form").hidden = !awaiting_two_factor;
-  if (awaiting_two_factor) $("twofa-code").focus();
+  // A pending two-factor step outranks whichever sign-in mode was chosen.
+  const mode = awaiting_two_factor ? "twofa" : state.authMode;
+  $("login-form").hidden = mode !== "password";
+  $("session-form").hidden = mode !== "session";
+  $("twofa-form").hidden = mode !== "twofa";
+
+  if (mode === "twofa") $("twofa-code").focus();
+  if (mode === "session") $("session-id").focus();
 
   if (authenticated) {
     $("account-name").textContent = username;
@@ -143,6 +149,45 @@ $("login-form").addEventListener("submit", async (e) => {
   } finally {
     btn.disabled = false;
     btn.textContent = "Sign in";
+  }
+});
+
+$("show-session-form").addEventListener("click", () => {
+  state.authMode = "session";
+  clearAuthError();
+  renderAuth();
+});
+
+$("show-login-form").addEventListener("click", () => {
+  state.authMode = "password";
+  clearAuthError();
+  renderAuth();
+});
+
+$("session-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  clearAuthError();
+  const btn = $("session-submit");
+  btn.disabled = true;
+  btn.textContent = "Checking session…";
+
+  try {
+    await api("/api/login-session", {
+      method: "POST",
+      body: {
+        sessionid: $("session-id").value,
+        username: $("login-username").value.trim(),
+      },
+    });
+    $("session-id").value = "";
+    state.authMode = "password";
+    await boot();
+    toast("Signed in", "Using your browser session.", "success");
+  } catch (err) {
+    showAuthError(err.message, err.hint || "");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Use this session";
   }
 });
 

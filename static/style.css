@@ -151,6 +151,19 @@ kbd {
 .auth-form label { display: flex; flex-direction: column; gap: 6px; }
 .auth-form label span { font-size: 12px; font-weight: 500; color: var(--text-dim); }
 .auth-note { font-size: 13px; color: var(--text-dim); }
+.link-btn.centered { text-align: center; width: 100%; font-size: 12.5px; }
+.steps {
+  margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px;
+  font-size: 12.5px; color: var(--text-dim); line-height: 1.5;
+}
+.steps code {
+  background: var(--surface-3); padding: 1px 5px; border-radius: 4px; color: var(--text);
+}
+.auth-warn {
+  font-size: 12px; line-height: 1.5; color: var(--warn);
+  background: var(--warn-soft); border: 1px solid var(--warn);
+  border-radius: var(--radius-sm); padding: 9px 11px;
+}
 .auth-error {
   margin-top: 16px; padding: 11px 13px; border-radius: var(--radius-sm);
   background: var(--danger-soft); border: 1px solid var(--danger);

@@ -9,9 +9,12 @@ rather than one generic failure.
 from __future__ import annotations
 
 import random
+import re
+import secrets
 import subprocess
 import threading
 import time
+import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -126,12 +129,15 @@ def describe(exc: Exception) -> AuthError:
         return AuthError("Two-factor code required.", "two_factor")
 
     if "checkpoint" in low or "challenge" in low:
-        return AuthError(
-            "Instagram wants you to verify this login.",
-            "challenge",
-            "Open Instagram on your phone, approve the login prompt, then try again. "
-            "If a link was shown above, opening it in a browser also clears the check.",
+        link = re.search(r"https?://\S+", text)
+        hint = (
+            "Approve the login on the Instagram app, then retry. If it keeps "
+            "failing, use a browser session instead - that skips the password "
+            "login Instagram is objecting to."
         )
+        if link:
+            hint = f"Open {link.group(0)} in your browser to clear it, then retry. " + hint
+        return AuthError("Instagram wants you to verify this login.", "challenge", hint)
 
     if is_rate_limited(exc):
         return AuthError(
@@ -244,6 +250,52 @@ def login(username: str, password: str) -> dict[str, Any]:
 
     _finish_login(loader, username)
     return {"authenticated": True, "username": username}
+
+
+def login_with_session_cookie(sessionid: str, username: str = "", csrftoken: str = "") -> dict[str, Any]:
+    """Adopt an existing browser session instead of logging in with a password.
+
+    Instagram frequently blocks password logins from non-browser clients with a
+    checkpoint. A session cookie from a browser that is already signed in
+    sidesteps that entirely, because the session is one Instagram already
+    trusts.
+    """
+    sessionid = sessionid.strip().strip('"')
+    if not sessionid:
+        raise AuthError("Paste the sessionid cookie value.", "missing_sessionid")
+
+    cookies = {
+        "sessionid": sessionid,
+        # load_session requires a csrftoken; for the read-only calls this app
+        # makes, any value works as long as cookie and header agree.
+        "csrftoken": csrftoken.strip() or secrets.token_hex(16),
+    }
+
+    # sessionid starts with the numeric user id, url-encoded as "<id>%3A...".
+    user_id = urllib.parse.unquote(sessionid).split(":")[0]
+    if user_id.isdigit():
+        cookies["ds_user_id"] = user_id
+
+    loader = build_loader()
+    try:
+        loader.load_session(username or "unknown", cookies)
+        resolved = loader.test_login()
+    except Exception as exc:
+        raise describe(exc) from exc
+
+    if not resolved:
+        raise AuthError(
+            "That session cookie was rejected.",
+            "bad_session",
+            "It may have expired, or been copied incompletely. Sign out and back "
+            "into Instagram in your browser, then copy the sessionid again.",
+        )
+
+    if username and resolved.lower() != username.lower():
+        events.log(f"Session belongs to {resolved}, not {username} - using {resolved}.", "warn")
+
+    _finish_login(loader, resolved)
+    return {"authenticated": True, "username": resolved}
 
 
 def two_factor(code: str) -> dict[str, Any]:
