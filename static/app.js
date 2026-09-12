@@ -1,92 +1,755 @@
-const selected = new Set();
+/* InstaVault dashboard */
 
-const grid = document.getElementById("grid");
-const countEl = document.getElementById("count");
-const downloadBtn = document.getElementById("download");
-const loadBtn = document.getElementById("load");
-const loginForm = document.getElementById("login-form");
-const loginError = document.getElementById("login-error");
+const $ = (id) => document.getElementById(id);
 
-function refreshCount() {
-  countEl.textContent = selected.size ? `${selected.size} selected` : "";
-  downloadBtn.disabled = selected.size === 0;
+const state = {
+  auth: { authenticated: false, username: "", awaiting_two_factor: false },
+  filters: { search: "", kind: "all", state: "all", collection: "", sort: "newest" },
+  items: [],
+  selected: new Set(),
+  offset: 0,
+  limit: 60,
+  hasMore: false,
+  total: 0,
+  loading: false,
+  job: null,
+};
+
+/* ── helpers ─────────────────────────────────────────────────────────────── */
+
+const fmtBytes = (n) => {
+  if (!n) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.min(Math.floor(Math.log(n) / Math.log(1024)), units.length - 1);
+  const value = n / 1024 ** i;
+  return `${value.toFixed(value >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
+};
+
+const fmtDuration = (seconds) => {
+  if (seconds == null) return "";
+  const s = Math.max(0, Math.round(seconds));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
+};
+
+const clockTime = (iso) => {
+  const d = iso ? new Date(iso) : new Date();
+  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+};
+
+const escapeHtml = (str) =>
+  String(str ?? "").replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]),
+  );
+
+const debounce = (fn, ms) => {
+  let t;
+  return (...args) => {
+    clearTimeout(t);
+    t = setTimeout(() => fn(...args), ms);
+  };
+};
+
+async function api(path, options = {}) {
+  const res = await fetch(path, {
+    headers: { "Content-Type": "application/json" },
+    ...options,
+    body: options.body ? JSON.stringify(options.body) : undefined,
+  });
+  let data = {};
+  try {
+    data = await res.json();
+  } catch {
+    /* empty body is fine */
+  }
+  if (!res.ok) {
+    const err = new Error(data.error || `Request failed (${res.status})`);
+    Object.assign(err, data, { status: res.status });
+    throw err;
+  }
+  return data;
 }
 
-function renderItems(items) {
-  grid.innerHTML = "";
-  for (const item of items) {
-    const card = document.createElement("div");
-    card.className = "card";
-    card.innerHTML = `
-      <img src="${item.thumbnail_url}" alt="" loading="lazy">
-      ${item.is_video ? '<span class="badge">video</span>' : ""}
-      <div class="meta">@${item.owner}</div>
-    `;
-    card.addEventListener("click", () => {
-      if (selected.has(item.shortcode)) {
-        selected.delete(item.shortcode);
-        card.classList.remove("selected");
-      } else {
-        selected.add(item.shortcode);
-        card.classList.add("selected");
-      }
-      refreshCount();
-    });
-    grid.appendChild(card);
+/* ── toasts ──────────────────────────────────────────────────────────────── */
+
+function toast(title, body = "", kind = "info", ttl = 5000) {
+  const el = document.createElement("div");
+  el.className = `toast ${kind}`;
+  el.innerHTML = `<strong>${escapeHtml(title)}</strong>${body ? `<span>${escapeHtml(body)}</span>` : ""}`;
+  $("toasts").appendChild(el);
+  setTimeout(() => {
+    el.style.opacity = "0";
+    setTimeout(() => el.remove(), 250);
+  }, ttl);
+}
+
+/* ── auth ────────────────────────────────────────────────────────────────── */
+
+function showAuthError(message, hint = "") {
+  $("auth-error-title").textContent = message;
+  $("auth-error-hint").textContent = hint;
+  $("auth-error").hidden = false;
+}
+
+function clearAuthError() {
+  $("auth-error").hidden = true;
+}
+
+function renderAuth() {
+  const { authenticated, username, awaiting_two_factor } = state.auth;
+
+  $("auth-screen").hidden = authenticated;
+  $("app").hidden = !authenticated;
+
+  $("login-form").hidden = awaiting_two_factor;
+  $("twofa-form").hidden = !awaiting_two_factor;
+  if (awaiting_two_factor) $("twofa-code").focus();
+
+  if (authenticated) {
+    $("account-name").textContent = username;
+    $("account-sub").textContent = "signed in";
+    $("account-avatar").textContent = (username[0] || "?").toUpperCase();
   }
 }
 
-loginForm?.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  loginError.hidden = true;
-  const data = Object.fromEntries(new FormData(loginForm));
+$("login-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  clearAuthError();
+  const btn = $("login-submit");
+  btn.disabled = true;
+  btn.textContent = "Signing in…";
 
-  const res = await fetch("/api/login", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(data),
+  try {
+    const result = await api("/api/login", {
+      method: "POST",
+      body: {
+        username: $("login-username").value.trim(),
+        password: $("login-password").value,
+      },
+    });
+
+    if (result.two_factor_required) {
+      state.auth.awaiting_two_factor = true;
+      renderAuth();
+    } else {
+      $("login-password").value = "";
+      await boot();
+      if (result.from_cache) toast("Welcome back", "Reused your saved session.", "success");
+    }
+  } catch (err) {
+    showAuthError(err.message, err.hint || "");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Sign in";
+  }
+});
+
+$("twofa-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  clearAuthError();
+  try {
+    await api("/api/two-factor", { method: "POST", body: { code: $("twofa-code").value.trim() } });
+    $("twofa-code").value = "";
+    $("login-password").value = "";
+    state.auth.awaiting_two_factor = false;
+    await boot();
+  } catch (err) {
+    showAuthError(err.message, err.hint || "");
+  }
+});
+
+$("twofa-back").addEventListener("click", () => {
+  state.auth.awaiting_two_factor = false;
+  clearAuthError();
+  renderAuth();
+});
+
+$("logout-btn").addEventListener("click", async () => {
+  const forget = confirm("Sign out?\n\nOK clears the cached session too (you'll need your password next time).\nCancel keeps it for a quick sign-in.");
+  await api("/api/logout", { method: "POST", body: { forget } });
+  state.auth = { authenticated: false, username: "", awaiting_two_factor: false };
+  renderAuth();
+});
+
+/* ── filters ─────────────────────────────────────────────────────────────── */
+
+document.querySelectorAll(".nav-item[data-state]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".nav-item[data-state]").forEach((b) => b.classList.remove("active"));
+    btn.classList.add("active");
+    state.filters.state = btn.dataset.state;
+    state.filters.collection = "";
+    document.querySelectorAll(".collection-list .nav-item").forEach((b) => b.classList.remove("active"));
+    reload();
   });
-  const body = await res.json();
+});
 
-  if (!res.ok) {
-    loginError.textContent = body.error || "Sign in failed.";
-    loginError.hidden = false;
+document.querySelectorAll(".chip[data-kind]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".chip[data-kind]").forEach((b) => b.classList.remove("active"));
+    btn.classList.add("active");
+    state.filters.kind = btn.dataset.kind;
+    reload();
+  });
+});
+
+$("search").addEventListener(
+  "input",
+  debounce((e) => {
+    state.filters.search = e.target.value.trim();
+    reload();
+  }, 300),
+);
+
+$("sort").addEventListener("change", (e) => {
+  state.filters.sort = e.target.value;
+  reload();
+});
+
+/* ── items ───────────────────────────────────────────────────────────────── */
+
+function itemQuery(extra = {}) {
+  return new URLSearchParams({
+    search: state.filters.search,
+    kind: state.filters.kind,
+    state: state.filters.state,
+    collection: state.filters.collection,
+    sort: state.filters.sort,
+    ...extra,
+  }).toString();
+}
+
+function showSkeletons(count = 12) {
+  $("grid").innerHTML = Array.from({ length: count })
+    .map(() => `<div class="skeleton"><div class="sk-media"></div><div class="sk-line" style="width:60%"></div><div class="sk-line" style="width:85%"></div></div>`)
+    .join("");
+}
+
+async function reload() {
+  state.offset = 0;
+  state.items = [];
+  showSkeletons();
+  await loadItems();
+}
+
+async function loadItems() {
+  if (state.loading) return;
+  state.loading = true;
+
+  try {
+    const data = await api(`/api/items?${itemQuery({ limit: state.limit, offset: state.offset })}`);
+    if (state.offset === 0) state.items = [];
+    state.items.push(...data.items);
+    state.total = data.total;
+    state.hasMore = data.has_more;
+    state.offset += data.items.length;
+    renderGrid();
+  } catch (err) {
+    toast("Could not load items", err.message, "error");
+  } finally {
+    state.loading = false;
+  }
+}
+
+function statusBadge(item) {
+  if (item.download_status === "done") return `<span class="badge done" title="Downloaded">✓</span>`;
+  if (item.download_status === "failed")
+    return `<span class="badge failed" title="${escapeHtml(item.download_error || "Failed")}">!</span>`;
+  return "";
+}
+
+function cardHtml(item) {
+  const kind = item.typename === "GraphSidecar" ? `${item.media_count}×` : item.is_video ? "▶" : "";
+  const duration = item.video_duration ? fmtDuration(item.video_duration) : "";
+
+  return `
+    <article class="card${state.selected.has(item.shortcode) ? " selected" : ""}"
+             data-shortcode="${item.shortcode}">
+      <div class="card-media">
+        <img src="/api/thumb/${item.shortcode}" alt="" loading="lazy"
+             onerror="this.style.display='none';this.nextElementSibling.hidden=false">
+        <div class="fallback" hidden>Thumbnail expired<br>Re-sync to refresh</div>
+        <div class="card-check">✓</div>
+        <div class="badges">
+          ${duration ? `<span class="badge">${duration}</span>` : ""}
+          ${kind ? `<span class="badge">${kind}</span>` : ""}
+          ${statusBadge(item)}
+        </div>
+      </div>
+      <div class="card-body">
+        <span class="card-owner">@${escapeHtml(item.owner || "unknown")}</span>
+        <span class="card-caption">${escapeHtml(item.caption || "No caption")}</span>
+      </div>
+    </article>`;
+}
+
+function renderGrid() {
+  const grid = $("grid");
+
+  if (!state.items.length) {
+    grid.innerHTML = "";
+    renderEmptyState();
+    $("load-more").hidden = true;
     return;
   }
 
-  document.getElementById("login").hidden = true;
-  document.getElementById("library").hidden = false;
-  document.getElementById("status").textContent = `Signed in as ${body.username}`;
-});
+  $("empty-state").hidden = true;
+  grid.innerHTML = state.items.map(cardHtml).join("");
+  $("load-more").hidden = !state.hasMore;
+  $("load-more").textContent = `Load more (${state.total - state.items.length} left)`;
 
-loadBtn?.addEventListener("click", async () => {
-  loadBtn.disabled = true;
-  loadBtn.textContent = "Loading…";
-  try {
-    const res = await fetch("/api/saved?limit=24");
-    const body = await res.json();
-    if (res.ok) renderItems(body);
-    else grid.innerHTML = `<p class="error">${body.error}</p>`;
-  } finally {
-    loadBtn.disabled = false;
-    loadBtn.textContent = "Load saved items";
-  }
-});
-
-downloadBtn?.addEventListener("click", async () => {
-  downloadBtn.disabled = true;
-  downloadBtn.textContent = "Downloading…";
-  try {
-    const res = await fetch("/api/download", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ shortcodes: [...selected] }),
+  grid.querySelectorAll(".card").forEach((card) => {
+    const code = card.dataset.shortcode;
+    card.querySelector(".card-check").addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleSelect(code);
     });
-    const results = await res.json();
-    const ok = results.filter((r) => r.ok).length;
-    countEl.textContent = `${ok} of ${results.length} downloaded`;
-  } finally {
-    downloadBtn.textContent = "Download selected";
-    refreshCount();
+    card.addEventListener("click", (e) => {
+      if (e.shiftKey || e.ctrlKey || e.metaKey) toggleSelect(code);
+      else openLightbox(code);
+    });
+  });
+}
+
+function renderEmptyState() {
+  const el = $("empty-state");
+  el.hidden = false;
+  const filtered =
+    state.filters.search || state.filters.kind !== "all" || state.filters.state !== "all";
+
+  if (filtered) {
+    $("empty-title").textContent = "No matches";
+    $("empty-body").textContent = "Nothing fits the current filters. Try clearing the search or switching back to All saved.";
+    $("empty-action").textContent = "Clear filters";
+    $("empty-action").onclick = () => {
+      state.filters = { search: "", kind: "all", state: "all", collection: "", sort: state.filters.sort };
+      $("search").value = "";
+      document.querySelectorAll(".nav-item[data-state]").forEach((b) => b.classList.toggle("active", b.dataset.state === "all"));
+      document.querySelectorAll(".chip[data-kind]").forEach((b) => b.classList.toggle("active", b.dataset.kind === "all"));
+      reload();
+    };
+  } else {
+    $("empty-title").textContent = "Your library is empty";
+    $("empty-body").textContent = "Sync pulls the list of everything you've saved on Instagram. Nothing is downloaded until you pick items.";
+    $("empty-action").textContent = "Sync saved items";
+    $("empty-action").onclick = startSync;
+  }
+}
+
+$("load-more").addEventListener("click", loadItems);
+
+$("content").addEventListener("scroll", () => {
+  const el = $("content");
+  if (state.hasMore && !state.loading && el.scrollTop + el.clientHeight > el.scrollHeight - 400) {
+    loadItems();
   }
 });
+
+/* ── selection ───────────────────────────────────────────────────────────── */
+
+function toggleSelect(shortcode) {
+  if (state.selected.has(shortcode)) state.selected.delete(shortcode);
+  else state.selected.add(shortcode);
+
+  document
+    .querySelector(`.card[data-shortcode="${shortcode}"]`)
+    ?.classList.toggle("selected", state.selected.has(shortcode));
+  renderSelection();
+}
+
+function renderSelection() {
+  const n = state.selected.size;
+  $("selection-bar").hidden = n === 0;
+  $("selection-count").textContent = `${n} selected`;
+  $("download-btn").textContent = n > 1 ? `Download ${n} items` : "Download selected";
+}
+
+$("clear-selection").addEventListener("click", () => {
+  state.selected.clear();
+  document.querySelectorAll(".card.selected").forEach((c) => c.classList.remove("selected"));
+  renderSelection();
+});
+
+$("select-all-matching").addEventListener("click", async () => {
+  try {
+    const { shortcodes } = await api(`/api/items/all?${itemQuery()}`);
+    shortcodes.forEach((s) => state.selected.add(s));
+    document.querySelectorAll(".card").forEach((c) => c.classList.add("selected"));
+    renderSelection();
+    toast("Selected", `${shortcodes.length} item(s) match the current filter.`);
+  } catch (err) {
+    toast("Selection failed", err.message, "error");
+  }
+});
+
+/* ── jobs ────────────────────────────────────────────────────────────────── */
+
+async function startSync() {
+  try {
+    await api("/api/sync", { method: "POST", body: {} });
+    openDock();
+    toast("Sync started", "Reading your saved feed.");
+  } catch (err) {
+    if (err.status === 409) toast("Already busy", "Wait for the running job to finish.", "warn");
+    else toast("Sync failed", err.message, "error");
+  }
+}
+
+$("sync-btn").addEventListener("click", startSync);
+
+$("download-btn").addEventListener("click", async () => {
+  const shortcodes = [...state.selected];
+  if (!shortcodes.length) return;
+
+  try {
+    await api("/api/download", {
+      method: "POST",
+      body: {
+        shortcodes,
+        folder: state.filters.collection || "saved",
+        extract_audio: $("extract-audio").checked,
+      },
+    });
+    openDock();
+    state.selected.clear();
+    document.querySelectorAll(".card.selected").forEach((c) => c.classList.remove("selected"));
+    renderSelection();
+    toast("Download queued", `${shortcodes.length} item(s) in the queue.`);
+  } catch (err) {
+    if (err.status === 409) toast("Already busy", "One job at a time keeps Instagram happy.", "warn");
+    else toast("Download failed", err.message, "error");
+  }
+});
+
+$("cancel-btn").addEventListener("click", async () => {
+  try {
+    await api("/api/cancel", { method: "POST", body: { job_id: state.job?.id || "" } });
+  } catch (err) {
+    toast("Could not cancel", err.message, "warn");
+  }
+});
+
+function renderJob(job) {
+  state.job = job;
+  const status = $("dock-status");
+  const fill = $("dock-progress-fill");
+  const meta = $("dock-meta");
+
+  if (!job) {
+    status.textContent = "Idle";
+    fill.style.width = "0%";
+    fill.className = "dock-progress-fill";
+    meta.textContent = "";
+    $("cancel-btn").hidden = true;
+    $("dock-detail").textContent = "No job running.";
+    return;
+  }
+
+  const labels = {
+    running: job.kind === "sync" ? "Syncing" : "Downloading",
+    done: "Finished",
+    failed: "Failed",
+    cancelled: "Cancelled",
+    queued: "Queued",
+  };
+  status.textContent = labels[job.status] || job.status;
+
+  // A sync has no known total until it finishes walking the feed.
+  const indeterminate = job.kind === "sync" && !job.total;
+  fill.style.width = indeterminate && job.status === "running" ? "100%" : `${job.percent}%`;
+  fill.className = `dock-progress-fill${job.status === "done" ? " done" : ""}${
+    job.status === "failed" ? " failed" : ""
+  }`;
+
+  const bits = [];
+  if (job.total) bits.push(`${job.processed}/${job.total}`);
+  else if (job.completed) bits.push(`${job.completed} found`);
+  if (job.failed) bits.push(`${job.failed} failed`);
+  if (job.bytes) bits.push(fmtBytes(job.bytes));
+  if (job.status === "running" && job.eta != null) bits.push(`~${fmtDuration(job.eta)} left`);
+  meta.textContent = bits.join(" · ");
+
+  $("cancel-btn").hidden = !job.cancellable;
+  $("dock-detail").textContent = job.detail || job.error || "";
+}
+
+/* ── dock + log ──────────────────────────────────────────────────────────── */
+
+function openDock() {
+  $("dock").dataset.open = "true";
+  $("dock-toggle").setAttribute("aria-expanded", "true");
+}
+
+$("dock-toggle").addEventListener("click", () => {
+  const dock = $("dock");
+  const open = dock.dataset.open === "true";
+  dock.dataset.open = String(!open);
+  $("dock-toggle").setAttribute("aria-expanded", String(!open));
+});
+
+function appendLog(entry) {
+  const log = $("log");
+  const li = document.createElement("li");
+  li.innerHTML = `<time>${clockTime(entry.at)}</time><span class="lvl-${entry.level || "info"}">${escapeHtml(entry.message)}</span>`;
+  log.appendChild(li);
+  while (log.children.length > 300) log.removeChild(log.firstChild);
+  log.scrollTop = log.scrollHeight;
+}
+
+/* ── stats ───────────────────────────────────────────────────────────────── */
+
+function renderStats(stats) {
+  $("count-all").textContent = stats.total;
+  $("count-pending").textContent = stats.pending;
+  $("count-downloaded").textContent = stats.downloaded;
+  $("count-failed").textContent = stats.failed;
+  $("stat-bytes").textContent = fmtBytes(stats.bytes);
+  $("stat-progress").textContent = `${stats.downloaded} of ${stats.total} downloaded`;
+  const pct = stats.total ? (stats.downloaded / stats.total) * 100 : 0;
+  $("storage-fill").style.width = `${pct}%`;
+}
+
+function renderCollections(collections) {
+  const block = $("collections-block");
+  const list = $("collections-list");
+  block.hidden = !collections.length;
+  list.innerHTML = collections
+    .map(
+      (c) =>
+        `<button class="nav-item" data-collection="${escapeHtml(c.name)}">
+           <span>${escapeHtml(c.name)}</span><span class="pill">${c.count}</span>
+         </button>`,
+    )
+    .join("");
+
+  list.querySelectorAll("[data-collection]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      list.querySelectorAll(".nav-item").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      state.filters.collection = btn.dataset.collection;
+      reload();
+    });
+  });
+}
+
+/* ── live updates ────────────────────────────────────────────────────────── */
+
+let sse;
+let sseRetry = 0;
+
+function connectEvents() {
+  sse?.close();
+  sse = new EventSource("/api/events");
+
+  sse.onopen = () => {
+    sseRetry = 0;
+  };
+
+  sse.onmessage = (raw) => {
+    let event;
+    try {
+      event = JSON.parse(raw.data);
+    } catch {
+      return;
+    }
+
+    switch (event.kind) {
+      case "job":
+        renderJob(event.job);
+        if (["done", "failed", "cancelled"].includes(event.job.status)) {
+          const kind = { done: "success", failed: "error", cancelled: "warn" }[event.job.status];
+          toast(event.job.kind === "sync" ? "Sync finished" : "Downloads finished", event.job.detail, kind);
+          reload();
+        }
+        break;
+
+      case "log":
+        appendLog(event);
+        break;
+
+      case "stats":
+        renderStats(event);
+        break;
+
+      case "item":
+        updateCardStatus(event);
+        break;
+
+      case "auth":
+        state.auth = { ...state.auth, ...event };
+        if (!event.authenticated) renderAuth();
+        break;
+
+      case "auth_error":
+        toast("Instagram rejected the request", event.error, "error", 9000);
+        break;
+
+      case "items_added":
+        if (state.offset === 0) reload();
+        break;
+    }
+  };
+
+  sse.onerror = () => {
+    sse.close();
+    sseRetry = Math.min(sseRetry + 1, 6);
+    setTimeout(connectEvents, 1000 * 2 ** sseRetry);
+  };
+}
+
+function updateCardStatus({ shortcode, status, error }) {
+  const card = document.querySelector(`.card[data-shortcode="${shortcode}"]`);
+  if (!card) return;
+
+  card.querySelectorAll(".badge.done, .badge.failed, .badge.busy").forEach((b) => b.remove());
+  const badges = card.querySelector(".badges");
+  if (status === "done" || status === "skipped") {
+    badges.insertAdjacentHTML("beforeend", `<span class="badge done" title="Downloaded">✓</span>`);
+  } else if (status === "failed") {
+    badges.insertAdjacentHTML("beforeend", `<span class="badge failed" title="${escapeHtml(error || "Failed")}">!</span>`);
+  }
+
+  const item = state.items.find((i) => i.shortcode === shortcode);
+  if (item) item.download_status = status === "skipped" ? "done" : status;
+}
+
+/* ── lightbox ────────────────────────────────────────────────────────────── */
+
+let lightboxIndex = -1;
+
+function openLightbox(shortcode) {
+  lightboxIndex = state.items.findIndex((i) => i.shortcode === shortcode);
+  if (lightboxIndex < 0) return;
+  renderLightbox();
+  $("lightbox").hidden = false;
+}
+
+function renderLightbox() {
+  const item = state.items[lightboxIndex];
+  if (!item) return;
+
+  const media = $("lightbox-media");
+  const downloaded = item.download_status === "done";
+
+  if (downloaded && item.is_video) {
+    media.innerHTML = `<video src="/api/media/${item.shortcode}" controls autoplay playsinline></video>`;
+  } else if (downloaded) {
+    media.innerHTML = `<img src="/api/media/${item.shortcode}" alt="">`;
+  } else {
+    media.innerHTML = `<img src="/api/thumb/${item.shortcode}" alt=""
+      onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'placeholder',textContent:'Preview unavailable — download the item to view it here.'}))">`;
+  }
+
+  $("lightbox-owner").textContent = `@${item.owner || "unknown"}`;
+  $("lightbox-caption").textContent = item.caption || "No caption";
+  $("lightbox-link").href = `https://www.instagram.com/p/${item.shortcode}/`;
+  $("lightbox-download").textContent = downloaded ? "Re-download" : "Download";
+  $("lightbox-download").onclick = async () => {
+    await api("/api/download", {
+      method: "POST",
+      body: { shortcodes: [item.shortcode], skip_existing: false, extract_audio: $("extract-audio").checked },
+    });
+    openDock();
+    toast("Download queued", `@${item.owner}`);
+  };
+}
+
+function closeLightbox() {
+  $("lightbox").hidden = true;
+  $("lightbox-media").innerHTML = "";
+}
+
+function stepLightbox(delta) {
+  const next = lightboxIndex + delta;
+  if (next < 0 || next >= state.items.length) return;
+  lightboxIndex = next;
+  renderLightbox();
+}
+
+$("lightbox-close").addEventListener("click", closeLightbox);
+$("lightbox-prev").addEventListener("click", () => stepLightbox(-1));
+$("lightbox-next").addEventListener("click", () => stepLightbox(1));
+$("lightbox").addEventListener("click", (e) => {
+  if (e.target === $("lightbox")) closeLightbox();
+});
+
+/* ── misc UI ─────────────────────────────────────────────────────────────── */
+
+$("theme-btn").addEventListener("click", () => {
+  const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  document.documentElement.dataset.theme = next;
+  localStorage.setItem("instavault-theme", next);
+});
+
+$("reveal-btn").addEventListener("click", async () => {
+  try {
+    await api("/api/reveal", { method: "POST", body: {} });
+  } catch (err) {
+    toast("Could not open folder", err.message, "warn");
+  }
+});
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    if (!$("lightbox").hidden) closeLightbox();
+    return;
+  }
+
+  if (!$("lightbox").hidden) {
+    if (e.key === "ArrowLeft") stepLightbox(-1);
+    if (e.key === "ArrowRight") stepLightbox(1);
+    return;
+  }
+
+  const typing = ["INPUT", "SELECT", "TEXTAREA"].includes(document.activeElement?.tagName);
+  if (typing) return;
+
+  if (e.key === "/") {
+    e.preventDefault();
+    $("search").focus();
+  }
+  if (e.key === "a") {
+    e.preventDefault();
+    $("select-all-matching").click();
+  }
+  if (e.key === "d" && state.selected.size) {
+    e.preventDefault();
+    $("download-btn").click();
+  }
+});
+
+/* ── boot ────────────────────────────────────────────────────────────────── */
+
+async function boot() {
+  const status = await api("/api/status");
+  state.auth = status.auth;
+  renderAuth();
+
+  if (!status.auth.authenticated) {
+    $("login-username").focus();
+    return;
+  }
+
+  renderStats(status.stats);
+  renderCollections(status.collections);
+  renderJob(status.job);
+
+  const history = await api("/api/log");
+  $("log").innerHTML = "";
+  history.filter((e) => e.kind === "log").slice(-60).forEach(appendLog);
+
+  await reload();
+}
+
+(function init() {
+  const saved = localStorage.getItem("instavault-theme");
+  if (saved) document.documentElement.dataset.theme = saved;
+
+  connectEvents();
+  boot().catch((err) => {
+    $("auth-screen").hidden = false;
+    showAuthError("Could not reach the InstaVault server.", err.message);
+  });
+})();

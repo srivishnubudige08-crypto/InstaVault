@@ -1,39 +1,211 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>InstaVault</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <header>
-    <h1>InstaVault</h1>
-    <p id="status">{% if logged_in %}Signed in as {{ username }}{% else %}Not signed in{% endif %}</p>
-  </header>
 
-  <main>
-    <section id="login" {% if logged_in %}hidden{% endif %}>
-      <h2>Sign in</h2>
-      <p class="hint">Credentials go straight to Instagram and the session is cached locally. Nothing is sent anywhere else.</p>
-      <form id="login-form">
-        <label>Username <input name="username" value="{{ username }}" autocomplete="username" required></label>
-        <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
-        <button type="submit">Sign in</button>
-      </form>
-      <p class="error" id="login-error" hidden></p>
-    </section>
-
-    <section id="library" {% if not logged_in %}hidden{% endif %}>
-      <div class="toolbar">
-        <button id="load">Load saved items</button>
-        <button id="download" disabled>Download selected</button>
-        <span id="count"></span>
+<!-- ───────────────────────────── auth gate ───────────────────────────── -->
+<div id="auth-screen" class="auth-screen" hidden>
+  <div class="auth-card">
+    <div class="auth-brand">
+      <div class="logo" aria-hidden="true"></div>
+      <div>
+        <h1>InstaVault</h1>
+        <p>Your saved Instagram items, kept locally.</p>
       </div>
-      <div id="grid" class="grid"></div>
+    </div>
+
+    <form id="login-form" class="auth-form">
+      <label>
+        <span>Username</span>
+        <input name="username" id="login-username" autocomplete="username"
+               placeholder="your.handle" required>
+      </label>
+      <label>
+        <span>Password</span>
+        <input name="password" id="login-password" type="password"
+               autocomplete="current-password" placeholder="Leave blank to reuse a saved session">
+      </label>
+      <button type="submit" class="btn primary block" id="login-submit">Sign in</button>
+    </form>
+
+    <form id="twofa-form" class="auth-form" hidden>
+      <p class="auth-note">
+        Enter the 6-digit code from your authenticator app or SMS.
+      </p>
+      <label>
+        <span>Two-factor code</span>
+        <input name="code" id="twofa-code" inputmode="numeric" autocomplete="one-time-code"
+               pattern="[0-9]*" maxlength="8" placeholder="123456" required>
+      </label>
+      <button type="submit" class="btn primary block">Verify</button>
+      <button type="button" class="btn ghost block" id="twofa-back">Start over</button>
+    </form>
+
+    <div id="auth-error" class="auth-error" hidden>
+      <strong id="auth-error-title"></strong>
+      <span id="auth-error-hint"></span>
+    </div>
+
+    <p class="auth-fineprint">
+      Credentials go straight to Instagram. The session is cached in
+      <code>session/</code> on this machine and nowhere else.
+    </p>
+  </div>
+</div>
+
+<!-- ───────────────────────────── app shell ───────────────────────────── -->
+<div id="app" class="shell" hidden>
+
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="logo" aria-hidden="true"></div>
+      <span>InstaVault</span>
+    </div>
+
+    <div class="account" id="account">
+      <div class="avatar" id="account-avatar">?</div>
+      <div class="account-meta">
+        <span class="account-name" id="account-name">—</span>
+        <span class="account-sub" id="account-sub">not signed in</span>
+      </div>
+      <button class="icon-btn" id="logout-btn" title="Sign out" aria-label="Sign out">⏻</button>
+    </div>
+
+    <nav class="filters">
+      <p class="nav-label">Library</p>
+      <button class="nav-item active" data-state="all">
+        <span>All saved</span><span class="pill" id="count-all">0</span>
+      </button>
+      <button class="nav-item" data-state="pending">
+        <span>Not downloaded</span><span class="pill" id="count-pending">0</span>
+      </button>
+      <button class="nav-item" data-state="downloaded">
+        <span>Downloaded</span><span class="pill" id="count-downloaded">0</span>
+      </button>
+      <button class="nav-item" data-state="failed">
+        <span>Failed</span><span class="pill" id="count-failed">0</span>
+      </button>
+
+      <p class="nav-label">Type</p>
+      <div class="chip-row">
+        <button class="chip active" data-kind="all">All</button>
+        <button class="chip" data-kind="video">Video</button>
+        <button class="chip" data-kind="photo">Photo</button>
+        <button class="chip" data-kind="carousel">Album</button>
+      </div>
+
+      <div id="collections-block" hidden>
+        <p class="nav-label">Collections</p>
+        <div id="collections-list" class="collection-list"></div>
+      </div>
+    </nav>
+
+    <div class="storage">
+      <div class="storage-row">
+        <span>Stored locally</span>
+        <strong id="stat-bytes">0 B</strong>
+      </div>
+      <div class="storage-bar"><div class="storage-fill" id="storage-fill"></div></div>
+      <div class="storage-row muted">
+        <span id="stat-progress">0 of 0 downloaded</span>
+        <button class="link-btn" id="reveal-btn">Open folder</button>
+      </div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <div class="search-wrap">
+        <input id="search" type="search" placeholder="Search captions and accounts…"
+               autocomplete="off" aria-label="Search saved items">
+        <kbd>/</kbd>
+      </div>
+
+      <div class="topbar-actions">
+        <select id="sort" aria-label="Sort order">
+          <option value="newest">Newest first</option>
+          <option value="oldest">Oldest first</option>
+          <option value="owner">By account</option>
+          <option value="added">Recently indexed</option>
+        </select>
+        <button class="btn ghost" id="theme-btn" title="Toggle theme" aria-label="Toggle theme">◐</button>
+        <button class="btn" id="sync-btn">Sync saved</button>
+      </div>
+    </header>
+
+    <div class="selection-bar" id="selection-bar" hidden>
+      <span id="selection-count">0 selected</span>
+      <button class="link-btn" id="select-all-matching">Select all matching</button>
+      <button class="link-btn" id="clear-selection">Clear</button>
+      <div class="spacer"></div>
+      <label class="toggle" title="Needs ffmpeg on PATH">
+        <input type="checkbox" id="extract-audio"> <span>Extract audio</span>
+      </label>
+      <button class="btn primary" id="download-btn">Download selected</button>
+    </div>
+
+    <section class="content" id="content">
+      <div class="grid" id="grid"></div>
+
+      <div class="state" id="empty-state" hidden>
+        <h2 id="empty-title">Nothing here yet</h2>
+        <p id="empty-body">Run a sync to pull in your saved items.</p>
+        <button class="btn primary" id="empty-action">Sync saved items</button>
+      </div>
+
+      <div class="load-more-wrap">
+        <button class="btn ghost" id="load-more" hidden>Load more</button>
+      </div>
     </section>
   </main>
 
-  <script src="/static/app.js"></script>
+  <!-- ─────────────────────────── activity dock ─────────────────────────── -->
+  <section class="dock" id="dock" data-open="false">
+    <button class="dock-header" id="dock-toggle" aria-expanded="false">
+      <span class="dock-status" id="dock-status">Idle</span>
+      <div class="dock-progress"><div class="dock-progress-fill" id="dock-progress-fill"></div></div>
+      <span class="dock-meta" id="dock-meta"></span>
+      <span class="dock-caret" aria-hidden="true">▲</span>
+    </button>
+
+    <div class="dock-body">
+      <div class="dock-toolbar">
+        <span id="dock-detail" class="dock-detail">No job running.</span>
+        <button class="btn danger small" id="cancel-btn" hidden>Cancel</button>
+      </div>
+      <ol class="log" id="log" aria-live="polite"></ol>
+    </div>
+  </section>
+</div>
+
+<!-- ───────────────────────────── lightbox ───────────────────────────── -->
+<div class="lightbox" id="lightbox" hidden>
+  <button class="lightbox-close" id="lightbox-close" aria-label="Close">✕</button>
+  <button class="lightbox-nav prev" id="lightbox-prev" aria-label="Previous">‹</button>
+  <figure class="lightbox-figure">
+    <div id="lightbox-media"></div>
+    <figcaption>
+      <strong id="lightbox-owner"></strong>
+      <p id="lightbox-caption"></p>
+      <div class="lightbox-actions">
+        <a id="lightbox-link" target="_blank" rel="noopener" class="btn ghost small">Open on Instagram</a>
+        <button class="btn small" id="lightbox-download">Download</button>
+      </div>
+    </figcaption>
+  </figure>
+  <button class="lightbox-nav next" id="lightbox-next" aria-label="Next">›</button>
+</div>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<script src="/static/app.js"></script>
 </body>
 </html>

@@ -6,3 +6,7 @@ downloads/
 session/
 *.session
 .DS_Store
+cache/
+*.db
+*.db-wal
+*.db-shm
