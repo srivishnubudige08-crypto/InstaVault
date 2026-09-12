@@ -377,19 +377,58 @@ def _safe(getter: Callable[[], Any], default: Any = None) -> Any:
     return default if value is None else value
 
 
-def _to_row(post: Any, collection: str = "") -> dict[str, Any]:
-    taken = _safe(lambda: post.date_utc)
+# Instagram media_type codes from the mobile API.
+_PHOTO, _VIDEO, _ALBUM = 1, 2, 8
+
+
+def _best_thumb(media: dict[str, Any]) -> str:
+    """Pull a display URL out of a mobile-API media object.
+
+    Carousels carry no top-level image, so fall back to the first child.
+    """
+    candidates = (media.get("image_versions2") or {}).get("candidates") or []
+    if not candidates:
+        children = media.get("carousel_media") or []
+        if children:
+            candidates = (children[0].get("image_versions2") or {}).get("candidates") or []
+    return candidates[0]["url"] if candidates else ""
+
+
+def _row_from_media(media: dict[str, Any]) -> dict[str, Any] | None:
+    """Turn one mobile-API media object into an index row."""
+    shortcode = media.get("code")
+    if not shortcode:
+        return None
+
+    media_type = media.get("media_type")
+    if media_type == _ALBUM:
+        typename, is_video = "GraphSidecar", 0
+    elif media_type == _VIDEO:
+        typename, is_video = "GraphVideo", 1
+    else:
+        typename, is_video = "GraphImage", 0
+
+    caption = media.get("caption")
+    caption_text = (caption or {}).get("text", "") if isinstance(caption, dict) else ""
+
+    taken = media.get("taken_at")
+    taken_iso = (
+        datetime.fromtimestamp(taken, timezone.utc)
+        if isinstance(taken, (int, float))
+        else datetime.now(timezone.utc)
+    ).isoformat(timespec="seconds")
+
     return {
-        "shortcode": post.shortcode,
-        "typename": _safe(lambda: post.typename, "GraphImage"),
-        "is_video": 1 if _safe(lambda: post.is_video, False) else 0,
-        "caption": (_safe(lambda: post.caption, "") or "")[:500],
-        "owner": _safe(lambda: post.owner_username, "") or "",
-        "thumb_url": _safe(lambda: post.url, "") or "",
-        "taken_at": (taken or datetime.now(timezone.utc)).isoformat(timespec="seconds"),
-        "media_count": int(_safe(lambda: post.mediacount, 1) or 1),
-        "video_duration": _safe(lambda: post.video_duration),
-        "collection": collection,
+        "shortcode": shortcode,
+        "typename": typename,
+        "is_video": is_video,
+        "caption": (caption_text or "")[:500],
+        "owner": (media.get("user") or {}).get("username", "") or "",
+        "thumb_url": _best_thumb(media),
+        "taken_at": taken_iso,
+        "media_count": len(media.get("carousel_media") or []) or 1,
+        "video_duration": media.get("video_duration"),
+        "collection": "",
         "discovered_at": None,
     }
 
@@ -400,45 +439,59 @@ def iter_saved(
     on_page: Callable[[list[dict[str, Any]]], None] | None = None,
     page_size: int = 24,
 ) -> Iterator[dict[str, Any]]:
-    """Walk the Saved feed, yielding rows and flushing them in batches.
+    """Walk the Saved feed via Instagram's mobile API, flushing per page.
 
-    Batching matters: the caller can persist and show results as they arrive
-    instead of waiting for a full walk of an account with thousands of saves.
+    The old GraphQL saved-media endpoint instaloader ships is deprecated - it
+    redirects to login and looks like an expired session. The mobile endpoint
+    ``feed/saved/posts/`` is the one Instagram still serves, and it returns full
+    media objects, so there is no per-item lookup to walk into more dead ends.
     """
     loader = require_loader()
-    profile = instaloader.Profile.own_profile(loader.context)
+    context = loader.context
 
-    batch: list[dict[str, Any]] = []
     count = 0
+    max_id: str | None = None
 
     try:
-        for post in profile.get_saved_posts():
+        while True:
             if stop is not None and stop.is_set():
                 raise Cancelled()
 
-            row = _to_row(post)
-            batch.append(row)
-            yield row
-            count += 1
+            limiter.wait(stop)
+            params: dict[str, Any] = {}
+            if max_id:
+                params["max_id"] = max_id
 
-            if len(batch) >= page_size:
-                if on_page:
-                    on_page(batch)
-                batch = []
-                limiter.relax()
+            data = context.get_iphone_json("api/v1/feed/saved/posts/", params)
+
+            batch: list[dict[str, Any]] = []
+            for entry in data.get("items", []):
+                media = entry.get("media") or entry
+                row = _row_from_media(media)
+                if row is None:
+                    continue
+                batch.append(row)
+                yield row
+                count += 1
+                if limit is not None and count >= limit:
+                    break
+
+            if batch and on_page:
+                on_page(batch)
+            limiter.relax()
 
             if limit is not None and count >= limit:
+                break
+            if not data.get("more_available"):
+                break
+            max_id = data.get("next_max_id")
+            if not max_id:
                 break
     except Cancelled:
         raise
     except Exception as exc:
         handle_auth_loss(exc)
-        if batch and on_page:
-            on_page(batch)
         raise
-    finally:
-        if batch and on_page:
-            on_page(batch)
 
 
 def fetch_collections() -> list[dict[str, Any]]:
