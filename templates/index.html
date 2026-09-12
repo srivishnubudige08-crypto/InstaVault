@@ -13,70 +13,117 @@
 
 <!-- ───────────────────────────── auth gate ───────────────────────────── -->
 <div id="auth-screen" class="auth-screen" hidden>
+  <div class="auth-aside" aria-hidden="true">
+    <div class="auth-aside-inner">
+      <div class="logo lg"></div>
+      <h2>Your saved Instagram, kept for good.</h2>
+      <p>Browse everything you've saved, then archive it to your own machine — nothing leaves this computer.</p>
+      <ul class="auth-points">
+        <li><span class="dot"></span> Runs entirely offline on localhost</li>
+        <li><span class="dot"></span> One folder per item, downloaded on demand</li>
+        <li><span class="dot"></span> Search, filter, and resume any time</li>
+      </ul>
+    </div>
+  </div>
+
   <div class="auth-card">
     <div class="auth-brand">
-      <div class="logo" aria-hidden="true"></div>
+      <div class="logo"></div>
       <div>
         <h1>InstaVault</h1>
-        <p>Your saved Instagram items, kept locally.</p>
+        <p>Sign in to your Instagram to begin.</p>
       </div>
     </div>
 
-    <form id="login-form" class="auth-form">
-      <label>
+    <div class="auth-tabs" role="tablist" id="auth-tabs">
+      <button class="auth-tab active" role="tab" data-mode="session" id="tab-session">
+        Browser session <span class="tab-badge">works reliably</span>
+      </button>
+      <button class="auth-tab" role="tab" data-mode="password" id="tab-password">
+        Password
+      </button>
+    </div>
+
+    <!-- ── browser session (default) ── -->
+    <form id="session-form" class="auth-form" novalidate>
+      <p class="auth-note">
+        Reuse a session from a browser you're already signed into. Instagram
+        trusts it, so there's no login for it to block.
+      </p>
+      <ol class="steps">
+        <li>Open <code>instagram.com</code> in your browser, signed in.</li>
+        <li><kbd>F12</kbd> → <strong>Application</strong> <span class="muted">(Firefox: Storage)</span> → <strong>Cookies</strong> → <code>instagram.com</code>.</li>
+        <li>Copy the <strong>Value</strong> of the row named <code>sessionid</code>.</li>
+      </ol>
+      <label class="field">
+        <span>sessionid cookie</span>
+        <input name="sessionid" id="session-id" placeholder="12345678%3AAbCdEf…"
+               autocomplete="off" spellcheck="false" required>
+      </label>
+      <button type="submit" class="btn primary block" id="session-submit">
+        <span class="btn-label">Use this session</span>
+      </button>
+      <p class="auth-warn">
+        <strong>Treat this like your password.</strong> It signs in as you — keep
+        it to this app and don't paste it anywhere online.
+      </p>
+    </form>
+
+    <!-- ── password ── -->
+    <form id="login-form" class="auth-form" hidden novalidate>
+      <label class="field">
         <span>Username</span>
         <input name="username" id="login-username" autocomplete="username"
                placeholder="your.handle" required>
       </label>
-      <label>
-        <span>Password</span>
-        <input name="password" id="login-password" type="password"
-               autocomplete="current-password" placeholder="Leave blank to reuse a saved session">
+      <label class="field">
+        <span class="field-row">Password
+          <a class="field-link" href="https://www.instagram.com/accounts/password/reset/"
+             target="_blank" rel="noopener">Forgot?</a>
+        </span>
+        <div class="input-affix">
+          <input name="password" id="login-password" type="password"
+                 autocomplete="current-password" placeholder="Leave blank to reuse a saved session">
+          <button type="button" class="affix-btn" id="toggle-password"
+                  aria-label="Show password" aria-pressed="false">
+            <svg class="eye" viewBox="0 0 24 24" width="18" height="18" fill="none"
+                 stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/>
+              <circle cx="12" cy="12" r="3"/>
+            </svg>
+            <svg class="eye-off" viewBox="0 0 24 24" width="18" height="18" fill="none"
+                 stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" hidden>
+              <path d="M3 3l18 18"/>
+              <path d="M10.6 5.1A10.8 10.8 0 0 1 12 5c6.5 0 10 7 10 7a17.6 17.6 0 0 1-3.9 4.6"/>
+              <path d="M6.6 6.6A17.6 17.6 0 0 0 2 12s3.5 7 10 7a10.8 10.8 0 0 0 3.4-.5"/>
+              <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/>
+            </svg>
+          </button>
+        </div>
       </label>
-      <button type="submit" class="btn primary block" id="login-submit">Sign in</button>
-      <button type="button" class="link-btn centered" id="show-session-form">
-        Instagram blocking this login? Use a browser session
+      <button type="submit" class="btn primary block" id="login-submit">
+        <span class="btn-label">Sign in</span>
       </button>
+      <p class="auth-hint">
+        If Instagram blocks this with a verification prompt, switch to
+        <button type="button" class="link-btn inline" id="jump-session">Browser session</button> —
+        it sidesteps the check.
+      </p>
     </form>
 
-    <form id="session-form" class="auth-form" hidden>
-      <p class="auth-note">
-        Instagram trusts a session that already exists. Copy one from a browser
-        where you're signed in - no password login, so nothing to challenge.
-      </p>
-      <ol class="steps">
-        <li>Open <code>instagram.com</code> in your browser, signed in.</li>
-        <li>Press <kbd>F12</kbd> → <strong>Application</strong> (Firefox: <strong>Storage</strong>) → <strong>Cookies</strong> → <code>https://www.instagram.com</code>.</li>
-        <li>Find the row named <code>sessionid</code> and copy its <strong>Value</strong>.</li>
-      </ol>
-      <label>
-        <span>sessionid cookie</span>
-        <input name="sessionid" id="session-id" placeholder="12345678%3AAbCdEf..." required>
-      </label>
-      <button type="submit" class="btn primary block" id="session-submit">Use this session</button>
-      <button type="button" class="link-btn centered" id="show-login-form">
-        Back to password sign-in
-      </button>
-      <p class="auth-warn">
-        This value is as powerful as your password — it signs in as you. Keep it
-        to this app; don't paste it into a chat, an issue, or anywhere online.
-      </p>
-    </form>
-
-    <form id="twofa-form" class="auth-form" hidden>
-      <p class="auth-note">
-        Enter the 6-digit code from your authenticator app or SMS.
-      </p>
-      <label>
+    <!-- ── two-factor ── -->
+    <form id="twofa-form" class="auth-form" hidden novalidate>
+      <p class="auth-note">Enter the 6-digit code from your authenticator app or SMS.</p>
+      <label class="field">
         <span>Two-factor code</span>
         <input name="code" id="twofa-code" inputmode="numeric" autocomplete="one-time-code"
                pattern="[0-9]*" maxlength="8" placeholder="123456" required>
       </label>
-      <button type="submit" class="btn primary block">Verify</button>
+      <button type="submit" class="btn primary block"><span class="btn-label">Verify</span></button>
       <button type="button" class="btn ghost block" id="twofa-back">Start over</button>
     </form>
 
-    <div id="auth-error" class="auth-error" hidden>
+    <div id="auth-error" class="auth-error" hidden role="alert">
       <strong id="auth-error-title"></strong>
       <span id="auth-error-hint"></span>
     </div>

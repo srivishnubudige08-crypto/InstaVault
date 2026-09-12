@@ -4,7 +4,7 @@ const $ = (id) => document.getElementById(id);
 
 const state = {
   auth: { authenticated: false, username: "", awaiting_two_factor: false },
-  authMode: "password", // password | session
+  authMode: "session", // session | password — session works past checkpoints
   filters: { search: "", kind: "all", state: "all", collection: "", sort: "newest" },
   items: [],
   selected: new Set(),
@@ -73,6 +73,21 @@ async function api(path, options = {}) {
   return data;
 }
 
+function withLoading(btn, fn) {
+  // Wraps an async submit so the button shows a spinner and can't double-fire.
+  return async (...args) => {
+    if (btn.classList.contains("is-loading")) return;
+    btn.classList.add("is-loading");
+    btn.disabled = true;
+    try {
+      return await fn(...args);
+    } finally {
+      btn.classList.remove("is-loading");
+      btn.disabled = false;
+    }
+  };
+}
+
 /* ── toasts ──────────────────────────────────────────────────────────────── */
 
 function toast(title, body = "", kind = "info", ttl = 5000) {
@@ -110,8 +125,14 @@ function renderAuth() {
   $("session-form").hidden = mode !== "session";
   $("twofa-form").hidden = mode !== "twofa";
 
+  // Tabs hide during the two-factor step — you can't switch mode mid-flow.
+  $("auth-tabs").hidden = awaiting_two_factor;
+  $("tab-session").classList.toggle("active", mode === "session");
+  $("tab-password").classList.toggle("active", mode === "password");
+
   if (mode === "twofa") $("twofa-code").focus();
-  if (mode === "session") $("session-id").focus();
+  else if (mode === "session") $("session-id").focus();
+  else if (mode === "password") $("login-username").focus();
 
   if (authenticated) {
     $("account-name").textContent = username;
@@ -120,76 +141,84 @@ function renderAuth() {
   }
 }
 
-$("login-form").addEventListener("submit", async (e) => {
-  e.preventDefault();
+function switchAuthMode(mode) {
+  state.authMode = mode;
   clearAuthError();
-  const btn = $("login-submit");
-  btn.disabled = true;
-  btn.textContent = "Signing in…";
+  renderAuth();
+}
 
-  try {
-    const result = await api("/api/login", {
-      method: "POST",
-      body: {
-        username: $("login-username").value.trim(),
-        password: $("login-password").value,
-      },
-    });
+$("tab-session").addEventListener("click", () => switchAuthMode("session"));
+$("tab-password").addEventListener("click", () => switchAuthMode("password"));
+$("jump-session").addEventListener("click", () => switchAuthMode("session"));
 
-    if (result.two_factor_required) {
-      state.auth.awaiting_two_factor = true;
-      renderAuth();
-    } else {
-      $("login-password").value = "";
-      await boot();
-      if (result.from_cache) toast("Welcome back", "Reused your saved session.", "success");
+$("toggle-password").addEventListener("click", () => {
+  const input = $("login-password");
+  const showing = input.type === "text";
+  input.type = showing ? "password" : "text";
+  $("toggle-password").setAttribute("aria-pressed", String(!showing));
+  $("toggle-password").setAttribute("aria-label", showing ? "Show password" : "Hide password");
+  $("toggle-password").querySelector(".eye").hidden = !showing;
+  $("toggle-password").querySelector(".eye-off").hidden = showing;
+  input.focus();
+});
+
+$("login-form").addEventListener(
+  "submit",
+  withLoading($("login-submit"), async (e) => {
+    e.preventDefault();
+    clearAuthError();
+
+    const username = $("login-username").value.trim();
+    if (!username) return showAuthError("Enter your Instagram username.");
+
+    try {
+      const result = await api("/api/login", {
+        method: "POST",
+        body: { username, password: $("login-password").value },
+      });
+
+      if (result.two_factor_required) {
+        state.auth.awaiting_two_factor = true;
+        renderAuth();
+      } else {
+        $("login-password").value = "";
+        await boot();
+        if (result.from_cache) toast("Welcome back", "Reused your saved session.", "success");
+      }
+    } catch (err) {
+      // A checkpoint means the password path is a dead end — move them to the
+      // session tab, but keep the explanation on screen.
+      if (err.code === "challenge") {
+        state.authMode = "session";
+        renderAuth();
+      }
+      showAuthError(err.message, err.hint || "");
     }
-  } catch (err) {
-    showAuthError(err.message, err.hint || "");
-  } finally {
-    btn.disabled = false;
-    btn.textContent = "Sign in";
-  }
-});
+  }),
+);
 
-$("show-session-form").addEventListener("click", () => {
-  state.authMode = "session";
-  clearAuthError();
-  renderAuth();
-});
+$("session-form").addEventListener(
+  "submit",
+  withLoading($("session-submit"), async (e) => {
+    e.preventDefault();
+    clearAuthError();
 
-$("show-login-form").addEventListener("click", () => {
-  state.authMode = "password";
-  clearAuthError();
-  renderAuth();
-});
+    const sessionid = $("session-id").value.trim();
+    if (!sessionid) return showAuthError("Paste the sessionid cookie value.");
 
-$("session-form").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  clearAuthError();
-  const btn = $("session-submit");
-  btn.disabled = true;
-  btn.textContent = "Checking session…";
-
-  try {
-    await api("/api/login-session", {
-      method: "POST",
-      body: {
-        sessionid: $("session-id").value,
-        username: $("login-username").value.trim(),
-      },
-    });
-    $("session-id").value = "";
-    state.authMode = "password";
-    await boot();
-    toast("Signed in", "Using your browser session.", "success");
-  } catch (err) {
-    showAuthError(err.message, err.hint || "");
-  } finally {
-    btn.disabled = false;
-    btn.textContent = "Use this session";
-  }
-});
+    try {
+      await api("/api/login-session", {
+        method: "POST",
+        body: { sessionid, username: $("login-username").value.trim() },
+      });
+      $("session-id").value = "";
+      await boot();
+      toast("Signed in", "Using your browser session.", "success");
+    } catch (err) {
+      showAuthError(err.message, err.hint || "");
+    }
+  }),
+);
 
 $("twofa-form").addEventListener("submit", async (e) => {
   e.preventDefault();

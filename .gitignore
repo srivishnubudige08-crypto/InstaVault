@@ -10,3 +10,4 @@ cache/
 *.db
 *.db-wal
 *.db-shm
+preview-*.html
