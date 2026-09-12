@@ -47,6 +47,11 @@
 
 * { box-sizing: border-box; }
 
+/* The UA rule for [hidden] is `display: none`, which any author `display`
+   declaration outranks. Most containers here are grid or flex, so without
+   this every "hidden" panel renders anyway, stacked by z-index. */
+[hidden] { display: none !important; }
+
 html, body { height: 100%; }
 
 body {
