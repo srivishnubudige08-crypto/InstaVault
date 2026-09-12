@@ -174,6 +174,16 @@ def stats():
     return jsonify(db.stats())
 
 
+@app.post("/api/collections/rename")
+def rename_collection():
+    payload = request.get_json(silent=True) or {}
+    cid = (payload.get("id") or "").strip()
+    if not cid:
+        return _error("Missing collection id.")
+    db.rename_collection(cid, payload.get("name") or "")
+    return jsonify({"collections": db.collections()})
+
+
 # ------------------------------------------------------------------------- jobs
 
 

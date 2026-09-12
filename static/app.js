@@ -482,7 +482,7 @@ $("download-btn").addEventListener("click", async () => {
       method: "POST",
       body: {
         shortcodes,
-        folder: state.filters.collection || "saved",
+        folder: state.collectionNames?.[state.filters.collection] || "saved",
         extract_audio: $("extract-audio").checked,
       },
     });
@@ -589,21 +589,48 @@ function renderCollections(collections) {
   const block = $("collections-block");
   const list = $("collections-list");
   block.hidden = !collections.length;
+  state.collectionNames = {};
+  collections.forEach((c) => (state.collectionNames[c.id] = c.name));
+
   list.innerHTML = collections
     .map(
-      (c) =>
-        `<button class="nav-item" data-collection="${escapeHtml(c.name)}">
-           <span>${escapeHtml(c.name)}</span><span class="pill">${c.count}</span>
-         </button>`,
+      (c) => `
+      <div class="nav-item collection-row${state.filters.collection === c.id ? " active" : ""}"
+           data-collection="${escapeHtml(c.id)}">
+        <span class="collection-name">${escapeHtml(c.name)}</span>
+        <button class="rename-btn" data-rename="${escapeHtml(c.id)}"
+                title="Rename collection" aria-label="Rename collection">✎</button>
+        <span class="pill">${c.count}</span>
+      </div>`,
     )
     .join("");
 
-  list.querySelectorAll("[data-collection]").forEach((btn) => {
-    btn.addEventListener("click", () => {
+  list.querySelectorAll(".collection-row").forEach((row) => {
+    row.addEventListener("click", () => {
       list.querySelectorAll(".nav-item").forEach((b) => b.classList.remove("active"));
-      btn.classList.add("active");
-      state.filters.collection = btn.dataset.collection;
+      row.classList.add("active");
+      state.filters.collection = row.dataset.collection;
+      state.filters.state = "all";
       reload();
+    });
+  });
+
+  list.querySelectorAll("[data-rename]").forEach((btn) => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const id = btn.dataset.rename;
+      const current = state.collectionNames[id] || "";
+      const name = prompt("Name this collection:", current.startsWith("Collection ·") ? "" : current);
+      if (name === null) return;
+      try {
+        const { collections: updated } = await api("/api/collections/rename", {
+          method: "POST",
+          body: { id, name },
+        });
+        renderCollections(updated);
+      } catch (err) {
+        toast("Rename failed", err.message, "error");
+      }
     });
   });
 }

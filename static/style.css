@@ -330,6 +330,15 @@ kbd {
 .chip.active { background: var(--accent); border-color: var(--accent); color: #fff; }
 
 .collection-list { display: flex; flex-direction: column; gap: 2px; }
+.collection-row { cursor: pointer; }
+.collection-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rename-btn {
+  border: 0; background: transparent; color: var(--text-faint); cursor: pointer;
+  font-size: 12px; padding: 2px 5px; border-radius: 5px; opacity: 0;
+  transition: opacity .12s, color .12s, background .12s;
+}
+.collection-row:hover .rename-btn { opacity: 1; }
+.rename-btn:hover { color: var(--text); background: var(--surface-3); }
 
 .storage { margin-top: auto; padding: 12px 8px 4px; border-top: 1px solid var(--border); }
 .storage-row { display: flex; justify-content: space-between; align-items: center; font-size: 12px; gap: 8px; }

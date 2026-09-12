@@ -418,6 +418,12 @@ def _row_from_media(media: dict[str, Any]) -> dict[str, Any] | None:
         else datetime.now(timezone.utc)
     ).isoformat(timespec="seconds")
 
+    # Instagram won't hand us collection names over a cookie session, but each
+    # saved item carries the ids of the custom collections it's filed under. We
+    # keep the first so items can be grouped; names are mapped separately.
+    collection_ids = media.get("saved_collection_ids") or []
+    collection = str(collection_ids[0]) if collection_ids else ""
+
     return {
         "shortcode": shortcode,
         "typename": typename,
@@ -428,7 +434,7 @@ def _row_from_media(media: dict[str, Any]) -> dict[str, Any] | None:
         "taken_at": taken_iso,
         "media_count": len(media.get("carousel_media") or []) or 1,
         "video_duration": media.get("video_duration"),
-        "collection": "",
+        "collection": collection,
         "discovered_at": None,
     }
 

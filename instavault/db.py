@@ -236,12 +236,52 @@ def get_item(shortcode: str) -> dict[str, Any] | None:
 
 
 def collections() -> list[dict[str, Any]]:
+    """Collections grouped by id, with the user-assigned name when there is one.
+
+    Instagram gives us only the id over a cookie session, so an unnamed
+    collection shows a short label the user can rename.
+    """
+    import json
+
+    names = json.loads(get_meta("collection_names", "{}") or "{}")
     rows = connection().execute(
-        """SELECT collection AS name, COUNT(*) AS count
+        """SELECT collection AS id, COUNT(*) AS count
            FROM items WHERE unsaved = 0 AND collection != ''
            GROUP BY collection ORDER BY count DESC"""
     )
-    return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        cid = r["id"]
+        out.append(
+            {
+                "id": cid,
+                "name": names.get(cid) or f"Collection {cid[-4:]}",
+                "named": cid in names,
+                "count": r["count"],
+            }
+        )
+    return out
+
+
+def rename_collection(collection_id: str, name: str) -> None:
+    import json
+
+    names = json.loads(get_meta("collection_names", "{}") or "{}")
+    name = name.strip()
+    if name:
+        names[collection_id] = name[:60]
+    else:
+        names.pop(collection_id, None)
+    set_meta("collection_names", json.dumps(names))
+
+
+def collection_name(collection_id: str) -> str:
+    import json
+
+    if not collection_id:
+        return "saved"
+    names = json.loads(get_meta("collection_names", "{}") or "{}")
+    return names.get(collection_id) or f"collection_{collection_id[-4:]}"
 
 
 # ----------------------------------------------------------------------- downloads
