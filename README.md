@@ -17,25 +17,31 @@ this only for content you saved yourself.
 
 ## Setup
 
-```bash
+PowerShell (note: `&&` is not a valid separator in Windows PowerShell 5.1 —
+run these one line at a time, or join them with `;`):
+
+```powershell
 python -m venv venv
-venv\Scripts\activate
-pip install -r requirements.txt
-copy .env.example .env
+.\venv\Scripts\python.exe -m pip install -r requirements.txt
+Copy-Item .env.example .env
 ```
 
 Then edit `.env` and set at least `IG_USERNAME`. Leave `IG_PASSWORD` blank and
 sign in through the dashboard instead — that way the password never sits on
-disk.
+disk. `.env` is optional to start: without it the app boots straight to the
+sign-in form.
 
 ## Run
 
-```bash
-venv\Scripts\activate
-python app.py
+```powershell
+.\venv\Scripts\python.exe app.py
 ```
 
 Open http://localhost:5000.
+
+Calling the venv's `python.exe` directly avoids `Activate.ps1`, which
+PowerShell blocks under a restricted execution policy. If you prefer an
+activated shell, use `.\venv\Scripts\Activate.ps1`.
 
 ## How it works
 
