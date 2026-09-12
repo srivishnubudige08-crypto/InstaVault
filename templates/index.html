@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>InstaVault</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1>InstaVault</h1>
+    <p id="status">{% if logged_in %}Signed in as {{ username }}{% else %}Not signed in{% endif %}</p>
+  </header>
+
+  <main>
+    <section id="login" {% if logged_in %}hidden{% endif %}>
+      <h2>Sign in</h2>
+      <p class="hint">Credentials go straight to Instagram and the session is cached locally. Nothing is sent anywhere else.</p>
+      <form id="login-form">
+        <label>Username <input name="username" value="{{ username }}" autocomplete="username" required></label>
+        <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
+        <button type="submit">Sign in</button>
+      </form>
+      <p class="error" id="login-error" hidden></p>
+    </section>
+
+    <section id="library" {% if not logged_in %}hidden{% endif %}>
+      <div class="toolbar">
+        <button id="load">Load saved items</button>
+        <button id="download" disabled>Download selected</button>
+        <span id="count"></span>
+      </div>
+      <div id="grid" class="grid"></div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

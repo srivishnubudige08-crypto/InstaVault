@@ -1,0 +1,85 @@
+:root {
+  --bg: #0f1012;
+  --panel: #17191d;
+  --border: #2a2d33;
+  --text: #e8e9eb;
+  --muted: #9a9ea6;
+  --accent: #4f8ef7;
+  --danger: #e2544c;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 2rem;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+header { margin-bottom: 2rem; }
+h1 { margin: 0; font-size: 22px; font-weight: 600; }
+h2 { font-size: 17px; font-weight: 600; margin-top: 0; }
+#status { color: var(--muted); margin: 4px 0 0; font-size: 14px; }
+
+section {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.25rem;
+  margin-bottom: 1.5rem;
+}
+
+.hint { color: var(--muted); font-size: 13px; margin-top: 0; }
+
+form { display: flex; flex-direction: column; gap: 12px; max-width: 320px; }
+label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+
+input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  color: var(--text);
+  font-size: 14px;
+}
+input:focus { outline: none; border-color: var(--accent); }
+
+button {
+  background: var(--accent);
+  border: none;
+  border-radius: 6px;
+  padding: 8px 14px;
+  color: #fff;
+  font-size: 14px;
+  cursor: pointer;
+}
+button:disabled { background: var(--border); color: var(--muted); cursor: not-allowed; }
+
+.toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 1rem; }
+#count { color: var(--muted); font-size: 13px; }
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 12px;
+}
+
+.card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  cursor: pointer;
+  position: relative;
+}
+.card.selected { border-color: var(--accent); }
+.card img { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; }
+.card .meta { padding: 8px; font-size: 12px; color: var(--muted); }
+.card .badge {
+  position: absolute; top: 6px; right: 6px;
+  background: rgba(0,0,0,0.7); border-radius: 4px;
+  padding: 2px 6px; font-size: 11px;
+}
+
+.error { color: var(--danger); font-size: 13px; }
