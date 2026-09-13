@@ -176,6 +176,14 @@
         <button class="chip" data-kind="carousel">Album</button>
       </div>
 
+      <p class="nav-label">Audio</p>
+      <div class="chip-row">
+        <button class="chip active" data-audio="any">Any</button>
+        <button class="chip" data-audio="original" title="Creator-made sound">Original</button>
+        <button class="chip" data-audio="licensed" title="Licensed music track">Licensed</button>
+        <button class="chip" data-audio="none">None</button>
+      </div>
+
       <div id="collections-block" hidden>
         <p class="nav-label">Collections</p>
         <div id="collections-list" class="collection-list"></div>
@@ -208,21 +216,52 @@
           <option value="newest">Newest first</option>
           <option value="oldest">Oldest first</option>
           <option value="owner">By account</option>
+          <option value="artist">By artist</option>
+          <option value="longest">Longest first</option>
+          <option value="shortest">Shortest first</option>
           <option value="added">Recently indexed</option>
         </select>
+        <button class="btn ghost" id="more-filters-btn" aria-expanded="false">Filters</button>
         <button class="btn ghost" id="theme-btn" title="Toggle theme" aria-label="Toggle theme">◐</button>
         <button class="btn" id="sync-btn">Sync saved</button>
       </div>
     </header>
+
+    <div class="filter-row" id="filter-row" hidden>
+      <label class="mini-field">
+        <span>Artist</span>
+        <input id="filter-artist" list="artist-list" placeholder="Any artist" autocomplete="off">
+        <datalist id="artist-list"></datalist>
+      </label>
+      <label class="mini-field">
+        <span>Account</span>
+        <input id="filter-owner" placeholder="Any account" autocomplete="off">
+      </label>
+      <label class="mini-field">
+        <span>Length</span>
+        <select id="filter-duration">
+          <option value="any">Any length</option>
+          <option value="short">Under 30s</option>
+          <option value="medium">30–60s</option>
+          <option value="long">Over 60s</option>
+        </select>
+      </label>
+      <button class="btn ghost small" id="audio-export-btn" title="Export your saved-audio list">
+        Export audio list
+      </button>
+    </div>
+
+    <div class="active-filters" id="active-filters" hidden></div>
 
     <div class="selection-bar" id="selection-bar" hidden>
       <span id="selection-count">0 selected</span>
       <button class="link-btn" id="select-all-matching">Select all matching</button>
       <button class="link-btn" id="clear-selection">Clear</button>
       <div class="spacer"></div>
-      <label class="toggle" title="Needs ffmpeg on PATH">
-        <input type="checkbox" id="extract-audio"> <span>Extract audio</span>
-      </label>
+      <div class="segmented" role="group" aria-label="What to download">
+        <button class="seg active" data-mode="full">Video + audio</button>
+        <button class="seg" data-mode="audio" title="Keeps only the sound">Audio only</button>
+      </div>
       <button class="btn primary" id="download-btn">Download selected</button>
     </div>
 

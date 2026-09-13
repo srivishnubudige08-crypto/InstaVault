@@ -214,18 +214,20 @@ class JobManager:
         folder: str = "saved",
         extract_audio: bool | None = None,
         skip_existing: bool = True,
+        mode: str = "full",
     ) -> Job:
         job = Job(kind="download")
         job.total = len(shortcodes)
 
         def body(j: Job) -> None:
-            events.log(f"Downloading {j.total} item(s) into '{folder}'.")
+            what = "audio" if mode == "audio" else "item"
+            events.log(f"Downloading {what} for {j.total} item(s) into '{folder}'.")
 
             for shortcode in shortcodes:
                 if j.stop.is_set():
                     raise client.Cancelled()
 
-                if skip_existing and db.is_downloaded(shortcode):
+                if skip_existing and db.is_downloaded(shortcode, mode):
                     j.skipped += 1
                     j.detail = f"Skipped {shortcode} - already downloaded"
                     self._emit(j)
@@ -236,8 +238,16 @@ class JobManager:
                 j.detail = f"Downloading {shortcode}"
                 self._emit(j)
 
+                # The index knows which route this item's audio takes.
+                item = db.get_item(shortcode) or {}
                 result = client.download_item(
-                    shortcode, folder=folder, stop=j.stop, extract_audio=extract_audio
+                    shortcode,
+                    folder=folder,
+                    stop=j.stop,
+                    extract_audio=extract_audio,
+                    mode=mode,
+                    audio_url=item.get("audio_url") or "",
+                    audio_kind=item.get("audio_kind") or "",
                 )
 
                 if result.get("ok"):
@@ -249,6 +259,7 @@ class JobManager:
                         path=result.get("path", ""),
                         size=result.get("bytes", 0),
                         files=result.get("files", 0),
+                        mode=mode,
                     )
                     events.publish(
                         "item", shortcode=shortcode, status="done",
@@ -257,7 +268,7 @@ class JobManager:
                 else:
                     j.failed += 1
                     error = result.get("error", "Unknown error")
-                    db.record_download(shortcode, "failed", error=error)
+                    db.record_download(shortcode, "failed", error=error, mode=mode)
                     events.publish("item", shortcode=shortcode, status="failed", error=error)
                     events.log(f"{shortcode}: {error}", "error")
 

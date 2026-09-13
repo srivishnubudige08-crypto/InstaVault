@@ -19,7 +19,7 @@ from flask import (
     stream_with_context,
 )
 
-from instavault import client, config, db, events, jobs
+from instavault import audio, client, config, db, events, jobs
 
 app = Flask(__name__)
 app.config["JSON_SORT_KEYS"] = False
@@ -127,15 +127,25 @@ def logout():
 # ------------------------------------------------------------------------ items
 
 
-@app.get("/api/items")
-def items():
+def _filter_args():
+    """Pull the shared filter set off the query string."""
     args = request.args
-    filters = {
+    return {
         "search": args.get("search", "").strip(),
         "kind": args.get("kind", "all"),
         "state": args.get("state", "all"),
         "collection": args.get("collection", "").strip(),
+        "audio": args.get("audio", "any"),
+        "artist": args.get("artist", "").strip(),
+        "owner": args.get("owner", "").strip(),
+        "duration": args.get("duration", "any"),
     }
+
+
+@app.get("/api/items")
+def items():
+    args = request.args
+    filters = _filter_args()
     limit = min(args.get("limit", type=int, default=60), 500)
     offset = max(args.get("offset", type=int, default=0), 0)
 
@@ -156,22 +166,69 @@ def items():
 @app.get("/api/items/all")
 def item_ids():
     """Every shortcode matching the current filter, for 'select all matching'."""
-    args = request.args
-    return jsonify(
-        {
-            "shortcodes": db.all_shortcodes(
-                search=args.get("search", "").strip(),
-                kind=args.get("kind", "all"),
-                state=args.get("state", "all"),
-                collection=args.get("collection", "").strip(),
-            )
-        }
-    )
+    return jsonify({"shortcodes": db.all_shortcodes(**_filter_args())})
+
+
+@app.get("/api/artists")
+def artists():
+    """Artists present in the index, for the filter's autocomplete."""
+    return jsonify({"artists": db.artists()})
 
 
 @app.get("/api/stats")
 def stats():
     return jsonify(db.stats())
+
+
+@app.get("/api/audio")
+def saved_audio():
+    """The saved-audio list, classified as creator-original or licensed."""
+    client.require_loader()
+    limit = request.args.get("limit", type=int)
+    tracks = audio.fetch_saved_audio(limit=limit)
+    if request.args.get("overlap") == "1":
+        tracks = audio.overlap_report(tracks)
+    return jsonify({"tracks": tracks, "count": len(tracks)})
+
+
+@app.get("/api/audio/overlap")
+def audio_overlap():
+    """Which saved tracks are the sound of reels already in the index."""
+    client.require_loader()
+    report = audio.overlap_report()
+    matched = [r for r in report if r["reel_count"]]
+    return jsonify(
+        {
+            "tracks": report,
+            "total": len(report),
+            "matched": len(matched),
+            "reels": sum(r["reel_count"] for r in report),
+        }
+    )
+
+
+@app.get("/api/audio/export")
+def audio_export():
+    """Download the saved-audio list as CSV or JSON."""
+    client.require_loader()
+    fmt = request.args.get("fmt", "csv").lower()
+    if fmt not in {"csv", "json"}:
+        return _error("fmt must be 'csv' or 'json'.")
+
+    kind = request.args.get("kind", "")          # original | licensed | ''
+    rows = audio.overlap_report()
+    if kind in {"original", "licensed"}:
+        rows = [r for r in rows if r["kind"] == kind]
+
+    body = audio.to_csv(rows) if fmt == "csv" else audio.to_json(rows)
+    mime = "text/csv" if fmt == "csv" else "application/json"
+    return Response(
+        body,
+        mimetype=mime,
+        headers={
+            "Content-Disposition": f'attachment; filename="instavault-audio.{fmt}"'
+        },
+    )
 
 
 @app.post("/api/collections/rename")
@@ -205,6 +262,10 @@ def download():
     if not shortcodes:
         return _error("Select at least one item.")
 
+    mode = payload.get("mode") or "full"
+    if mode not in {"full", "audio"}:
+        return _error("mode must be 'full' or 'audio'.")
+
     client.require_loader()
     try:
         job = jobs.manager.start_download(
@@ -212,6 +273,7 @@ def download():
             folder=payload.get("folder") or "saved",
             extract_audio=payload.get("extract_audio"),
             skip_existing=payload.get("skip_existing", True),
+            mode=mode,
         )
     except RuntimeError as exc:
         return _error(str(exc), 409, job=jobs.manager.current())

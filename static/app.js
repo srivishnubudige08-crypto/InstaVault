@@ -5,7 +5,13 @@ const $ = (id) => document.getElementById(id);
 const state = {
   auth: { authenticated: false, username: "", awaiting_two_factor: false },
   authMode: "session", // session | password — session works past checkpoints
-  filters: { search: "", kind: "all", state: "all", collection: "", sort: "newest" },
+  filters: {
+    search: "", kind: "all", state: "all", collection: "",
+    audio: "any", artist: "", owner: "", duration: "any",
+    sort: "newest",
+  },
+  mode: "full", // full | audio — what a download fetches
+  collectionNames: {},
   items: [],
   selected: new Set(),
   offset: 0,
@@ -260,14 +266,135 @@ document.querySelectorAll(".nav-item[data-state]").forEach((btn) => {
   });
 });
 
-document.querySelectorAll(".chip[data-kind]").forEach((btn) => {
-  btn.addEventListener("click", () => {
-    document.querySelectorAll(".chip[data-kind]").forEach((b) => b.classList.remove("active"));
-    btn.classList.add("active");
-    state.filters.kind = btn.dataset.kind;
+function wireChipRow(attr, key) {
+  document.querySelectorAll(`.chip[data-${attr}]`).forEach((btn) => {
+    btn.addEventListener("click", () => {
+      document
+        .querySelectorAll(`.chip[data-${attr}]`)
+        .forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      state.filters[key] = btn.dataset[attr];
+      reload();
+    });
+  });
+}
+
+wireChipRow("kind", "kind");
+wireChipRow("audio", "audio");
+
+$("more-filters-btn").addEventListener("click", () => {
+  const row = $("filter-row");
+  row.hidden = !row.hidden;
+  $("more-filters-btn").setAttribute("aria-expanded", String(!row.hidden));
+});
+
+$("filter-artist").addEventListener(
+  "input",
+  debounce((e) => {
+    state.filters.artist = e.target.value.trim();
+    reload();
+  }, 300),
+);
+
+$("filter-owner").addEventListener(
+  "input",
+  debounce((e) => {
+    state.filters.owner = e.target.value.trim();
+    reload();
+  }, 300),
+);
+
+$("filter-duration").addEventListener("change", (e) => {
+  state.filters.duration = e.target.value;
+  reload();
+});
+
+/* ── active filter chips ─────────────────────────────────────────────────── */
+
+const FILTER_LABELS = {
+  search: "Search",
+  kind: "Type",
+  state: "Status",
+  collection: "Collection",
+  audio: "Audio",
+  artist: "Artist",
+  owner: "Account",
+  duration: "Length",
+};
+
+const FILTER_DEFAULTS = {
+  search: "", kind: "all", state: "all", collection: "",
+  audio: "any", artist: "", owner: "", duration: "any",
+};
+
+function clearFilter(key) {
+  state.filters[key] = FILTER_DEFAULTS[key];
+
+  if (key === "search") $("search").value = "";
+  if (key === "artist") $("filter-artist").value = "";
+  if (key === "owner") $("filter-owner").value = "";
+  if (key === "duration") $("filter-duration").value = "any";
+  if (key === "kind" || key === "audio") {
+    document.querySelectorAll(`.chip[data-${key}]`).forEach((b) =>
+      b.classList.toggle("active", b.dataset[key] === FILTER_DEFAULTS[key]),
+    );
+  }
+  if (key === "state") {
+    document.querySelectorAll(".nav-item[data-state]").forEach((b) =>
+      b.classList.toggle("active", b.dataset.state === "all"),
+    );
+  }
+  if (key === "collection") {
+    document.querySelectorAll(".collection-row").forEach((b) => b.classList.remove("active"));
+  }
+  reload();
+}
+
+function renderActiveFilters() {
+  const active = Object.entries(FILTER_DEFAULTS).filter(
+    ([key, fallback]) => state.filters[key] !== fallback,
+  );
+
+  const bar = $("active-filters");
+  bar.hidden = active.length === 0;
+  if (!active.length) return;
+
+  const display = (key) => {
+    const value = state.filters[key];
+    if (key === "collection") return state.collectionNames[value] || value;
+    return value;
+  };
+
+  bar.innerHTML =
+    active
+      .map(
+        ([key]) => `
+      <span class="filter-chip">${FILTER_LABELS[key]}: <b>${escapeHtml(display(key))}</b>
+        <button data-clear="${key}" aria-label="Remove ${FILTER_LABELS[key]} filter">✕</button>
+      </span>`,
+      )
+      .join("") +
+    `<button class="link-btn" id="clear-all-filters">Clear all</button>`;
+
+  bar.querySelectorAll("[data-clear]").forEach((btn) =>
+    btn.addEventListener("click", () => clearFilter(btn.dataset.clear)),
+  );
+  $("clear-all-filters").addEventListener("click", () => {
+    Object.assign(state.filters, FILTER_DEFAULTS);
+    $("search").value = "";
+    $("filter-artist").value = "";
+    $("filter-owner").value = "";
+    $("filter-duration").value = "any";
+    document.querySelectorAll(".chip[data-kind]").forEach((b) =>
+      b.classList.toggle("active", b.dataset.kind === "all"));
+    document.querySelectorAll(".chip[data-audio]").forEach((b) =>
+      b.classList.toggle("active", b.dataset.audio === "any"));
+    document.querySelectorAll(".nav-item[data-state]").forEach((b) =>
+      b.classList.toggle("active", b.dataset.state === "all"));
+    document.querySelectorAll(".collection-row").forEach((b) => b.classList.remove("active"));
     reload();
   });
-});
+}
 
 $("search").addEventListener(
   "input",
@@ -290,6 +417,10 @@ function itemQuery(extra = {}) {
     kind: state.filters.kind,
     state: state.filters.state,
     collection: state.filters.collection,
+    audio: state.filters.audio,
+    artist: state.filters.artist,
+    owner: state.filters.owner,
+    duration: state.filters.duration,
     sort: state.filters.sort,
     ...extra,
   }).toString();
@@ -355,12 +486,23 @@ function cardHtml(item) {
       <div class="card-body">
         <span class="card-owner">@${escapeHtml(item.owner || "unknown")}</span>
         <span class="card-caption">${escapeHtml(item.caption || "No caption")}</span>
+        ${audioLine(item)}
       </div>
     </article>`;
 }
 
+function audioLine(item) {
+  if (!item.audio_kind) return "";
+  const label = [item.audio_title, item.audio_artist].filter(Boolean).join(" · ");
+  const title = item.audio_kind === "original" ? "Creator sound" : "Licensed track";
+  return `<span class="card-audio ${item.audio_kind}" title="${title}">
+            <span class="audio-dot"></span>${escapeHtml(label || title)}
+          </span>`;
+}
+
 function renderGrid() {
   const grid = $("grid");
+  renderActiveFilters();
 
   if (!state.items.length) {
     grid.innerHTML = "";
@@ -437,8 +579,51 @@ function renderSelection() {
   const n = state.selected.size;
   $("selection-bar").hidden = n === 0;
   $("selection-count").textContent = `${n} selected`;
-  $("download-btn").textContent = n > 1 ? `Download ${n} items` : "Download selected";
+  const what = state.mode === "audio" ? "audio" : "";
+  $("download-btn").textContent = n > 1
+    ? `Download ${what} for ${n} items`.replace("  ", " ")
+    : `Download ${what || "selected"}`.trim();
 }
+
+document.querySelectorAll(".seg[data-mode]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".seg[data-mode]").forEach((b) => b.classList.remove("active"));
+    btn.classList.add("active");
+    state.mode = btn.dataset.mode;
+    renderSelection();
+  });
+});
+
+$("audio-export-btn").addEventListener("click", async () => {
+  const btn = $("audio-export-btn");
+  btn.disabled = true;
+  btn.textContent = "Reading…";
+  try {
+    // Fetch first so an auth/API error surfaces as a toast rather than a
+    // broken file download.
+    const res = await fetch("/api/audio/export?fmt=csv");
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error || `Export failed (${res.status})`);
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = Object.assign(document.createElement("a"), {
+      href: url,
+      download: "instavault-audio.csv",
+    });
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    toast("Audio list exported", "Saved as instavault-audio.csv", "success");
+  } catch (err) {
+    toast("Could not export", err.message, "error");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Export audio list";
+  }
+});
 
 $("clear-selection").addEventListener("click", () => {
   state.selected.clear();
@@ -483,7 +668,7 @@ $("download-btn").addEventListener("click", async () => {
       body: {
         shortcodes,
         folder: state.collectionNames?.[state.filters.collection] || "saved",
-        extract_audio: $("extract-audio").checked,
+        mode: state.mode,
       },
     });
     openDock();
@@ -583,6 +768,17 @@ function renderStats(stats) {
   $("stat-progress").textContent = `${stats.downloaded} of ${stats.total} downloaded`;
   const pct = stats.total ? (stats.downloaded / stats.total) * 100 : 0;
   $("storage-fill").style.width = `${pct}%`;
+}
+
+async function loadArtists() {
+  try {
+    const { artists } = await api("/api/artists");
+    $("artist-list").innerHTML = artists
+      .map((a) => `<option value="${escapeHtml(a)}">`)
+      .join("");
+  } catch {
+    /* autocomplete is a convenience; a failure here shouldn't block the page */
+  }
 }
 
 function renderCollections(collections) {
@@ -750,7 +946,7 @@ function renderLightbox() {
   $("lightbox-download").onclick = async () => {
     await api("/api/download", {
       method: "POST",
-      body: { shortcodes: [item.shortcode], skip_existing: false, extract_audio: $("extract-audio").checked },
+      body: { shortcodes: [item.shortcode], skip_existing: false, mode: state.mode },
     });
     openDock();
     toast("Download queued", `@${item.owner}`);
@@ -836,6 +1032,7 @@ async function boot() {
   renderStats(status.stats);
   renderCollections(status.collections);
   renderJob(status.job);
+  loadArtists();
 
   const history = await api("/api/log");
   $("log").innerHTML = "";

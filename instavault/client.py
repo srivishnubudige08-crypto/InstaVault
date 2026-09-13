@@ -394,6 +394,50 @@ def _best_thumb(media: dict[str, Any]) -> str:
     return candidates[0]["url"] if candidates else ""
 
 
+def _audio_meta(media: dict[str, Any]) -> dict[str, Any]:
+    """Audio details for a reel, and which route may fetch it.
+
+    Creator-made sound keeps its direct URL. For a licensed catalog track we
+    deliberately keep the title and artist but *not* the asset URL - that URL is
+    the commercial master, and the audio for those reels is extracted from the
+    reel's own video instead. Not storing it keeps the rule enforced at the data
+    layer rather than relying on call sites to remember.
+    """
+    blank = {
+        "audio_url": "",
+        "audio_title": "",
+        "audio_artist": "",
+        "audio_kind": "",
+        "audio_asset_id": "",
+    }
+
+    clips = media.get("clips_metadata") or {}
+    if not clips:
+        return blank
+
+    original = clips.get("original_sound_info") or {}
+    if original:
+        return {
+            "audio_url": original.get("progressive_download_url") or "",
+            "audio_title": (original.get("original_audio_title") or "")[:200],
+            "audio_artist": (original.get("ig_artist") or {}).get("username", "") or "",
+            "audio_kind": "original",
+            "audio_asset_id": str(original.get("audio_asset_id") or ""),
+        }
+
+    asset = (clips.get("music_info") or {}).get("music_asset_info") or {}
+    if asset:
+        return {
+            "audio_url": "",  # catalog master - intentionally not stored
+            "audio_title": (asset.get("title") or "")[:200],
+            "audio_artist": (asset.get("display_artist") or "")[:200],
+            "audio_kind": "music",
+            "audio_asset_id": str(asset.get("audio_asset_id") or ""),
+        }
+
+    return blank
+
+
 def _row_from_media(media: dict[str, Any]) -> dict[str, Any] | None:
     """Turn one mobile-API media object into an index row."""
     shortcode = media.get("code")
@@ -436,6 +480,7 @@ def _row_from_media(media: dict[str, Any]) -> dict[str, Any] | None:
         "video_duration": media.get("video_duration"),
         "collection": collection,
         "discovered_at": None,
+        **_audio_meta(media),
     }
 
 
@@ -571,16 +616,83 @@ def _extract_audio(item_dir: Path) -> int:
     return made
 
 
+def _safe_folder(folder: str) -> str:
+    return "".join(c for c in folder if c.isalnum() or c in " -_") or "saved"
+
+
+def _fetch_to_file(url: str, dest: Path, stop: threading.Event | None = None) -> int:
+    """Stream a URL to disk through the authenticated session."""
+    loader = require_loader()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    written = 0
+    with loader.context._session.get(url, stream=True, timeout=60) as response:
+        response.raise_for_status()
+        with open(dest, "wb") as handle:
+            for chunk in response.iter_content(chunk_size=64 * 1024):
+                if stop is not None and stop.is_set():
+                    raise Cancelled()
+                handle.write(chunk)
+                written += len(chunk)
+
+    if written == 0:
+        dest.unlink(missing_ok=True)
+    return written
+
+
+def _purge_video(item_dir: Path) -> int:
+    """Drop video and poster files, leaving audio behind."""
+    removed = 0
+    for path in list(item_dir.iterdir()) if item_dir.exists() else []:
+        if path.is_file() and path.suffix.lower() in {".mp4", ".mov", ".jpg", ".jpeg", ".webp"}:
+            path.unlink(missing_ok=True)
+            removed += 1
+    return removed
+
+
 def download_item(
     shortcode: str,
     folder: str = "saved",
     stop: threading.Event | None = None,
     extract_audio: bool | None = None,
+    mode: str = "full",
+    audio_url: str = "",
+    audio_kind: str = "",
 ) -> dict[str, Any]:
-    """Download one item into its own folder, retrying transient failures."""
+    """Download one item into its own folder, retrying transient failures.
+
+    mode "full" fetches the media as published. mode "audio" keeps only the
+    sound: a creator-made track is fetched directly from its own URL with no
+    video transfer at all, while anything else falls back to pulling the video
+    and extracting its published mix with ffmpeg.
+    """
     loader = require_loader()
-    safe_folder = "".join(c for c in folder if c.isalnum() or c in " -_") or "saved"
+    safe_folder = _safe_folder(folder)
     item_dir = config.DOWNLOAD_DIR / safe_folder / shortcode
+
+    # Creator sound: straight download, no video fetched.
+    if mode == "audio" and audio_kind == "original" and audio_url:
+        dest = item_dir / f"{shortcode}.m4a"
+        if dest.exists() and dest.stat().st_size > 0:
+            size, files = _dir_stats(item_dir)
+            return {"shortcode": shortcode, "ok": True, "path": str(item_dir),
+                    "bytes": size, "files": files, "audio_tracks": 1, "mode": "audio"}
+        try:
+            limiter.wait(stop)
+            written = _fetch_to_file(audio_url, dest, stop)
+            if written > 0:
+                limiter.relax()
+                return {"shortcode": shortcode, "ok": True, "path": str(item_dir),
+                        "bytes": written, "files": 1, "audio_tracks": 1, "mode": "audio"}
+        except Cancelled:
+            raise
+        except Exception as exc:
+            # URL has almost certainly expired; the video route still works.
+            events.log(
+                f"{shortcode}: direct audio fetch failed ({exc}); "
+                f"extracting from the video instead.",
+                "warn",
+            )
     attempts = max(1, config.MAX_RETRIES)
     last_error: Exception | None = None
 
@@ -603,11 +715,26 @@ def download_item(
                 raise RuntimeError("Instagram returned no media for this item.")
 
             audio = 0
-            want_audio = config.EXTRACT_AUDIO if extract_audio is None else extract_audio
+            want_audio = (
+                mode == "audio"
+                or (config.EXTRACT_AUDIO if extract_audio is None else extract_audio)
+            )
             if want_audio and post.is_video:
                 audio = _extract_audio(item_dir)
                 if audio:
                     size, files = _dir_stats(item_dir)
+
+            if mode == "audio":
+                if not audio:
+                    reason = (
+                        "ffmpeg is not installed, so the audio could not be "
+                        "extracted from the video."
+                        if not config.ffmpeg_path()
+                        else "the audio track could not be extracted."
+                    )
+                    return {"shortcode": shortcode, "ok": False, "error": reason}
+                _purge_video(item_dir)
+                size, files = _dir_stats(item_dir)
 
             limiter.relax()
             return {
@@ -617,6 +744,7 @@ def download_item(
                 "bytes": size,
                 "files": files,
                 "audio_tracks": audio,
+                "mode": mode,
             }
 
         except Cancelled:

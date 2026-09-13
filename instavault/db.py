@@ -80,13 +80,72 @@ def transaction() -> Iterator[sqlite3.Connection]:
         raise
 
 
+# Columns added after the first release. Applied with ALTER TABLE so an existing
+# index survives - the database holds the user's whole sync and must never be
+# recreated to pick up a new field.
+MIGRATIONS: dict[str, dict[str, str]] = {
+    "items": {
+        "audio_url": "TEXT DEFAULT ''",
+        "audio_title": "TEXT DEFAULT ''",
+        "audio_artist": "TEXT DEFAULT ''",
+        "audio_kind": "TEXT DEFAULT ''",       # original | music | ''
+        "audio_asset_id": "TEXT DEFAULT ''",
+    },
+    "downloads": {
+        "mode": "TEXT DEFAULT 'full'",         # full | audio
+    },
+}
+
+
+def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _migrate(conn: sqlite3.Connection) -> list[str]:
+    applied = []
+    for table, columns in MIGRATIONS.items():
+        existing = _columns(conn, table)
+        for name, decl in columns.items():
+            if name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+                applied.append(f"{table}.{name}")
+    return applied
+
+
 def init() -> None:
     with transaction() as conn:
         conn.executescript(SCHEMA)
+        _migrate(conn)
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+# Every column the item upsert binds, with a safe default. Callers that predate
+# a field (or rows built from a partial payload) still insert cleanly.
+ITEM_DEFAULTS: dict[str, Any] = {
+    "typename": "GraphImage",
+    "is_video": 0,
+    "caption": "",
+    "owner": "",
+    "thumb_url": "",
+    "taken_at": None,
+    "media_count": 1,
+    "video_duration": None,
+    "collection": "",
+    "audio_url": "",
+    "audio_title": "",
+    "audio_artist": "",
+    "audio_kind": "",
+    "audio_asset_id": "",
+}
+
+
+def _normalise(row: dict[str, Any]) -> dict[str, Any]:
+    out = {**ITEM_DEFAULTS, **row}
+    out["discovered_at"] = row.get("discovered_at") or _now()
+    return out
 
 
 # --------------------------------------------------------------------------- items
@@ -111,19 +170,28 @@ def upsert_items(items: Iterable[dict[str, Any]]) -> int:
             """
             INSERT INTO items (shortcode, typename, is_video, caption, owner,
                                thumb_url, taken_at, media_count, video_duration,
-                               collection, discovered_at, unsaved)
+                               collection, discovered_at, unsaved,
+                               audio_url, audio_title, audio_artist, audio_kind,
+                               audio_asset_id)
             VALUES (:shortcode, :typename, :is_video, :caption, :owner,
                     :thumb_url, :taken_at, :media_count, :video_duration,
-                    :collection, :discovered_at, 0)
+                    :collection, :discovered_at, 0,
+                    :audio_url, :audio_title, :audio_artist, :audio_kind,
+                    :audio_asset_id)
             ON CONFLICT(shortcode) DO UPDATE SET
-                thumb_url  = excluded.thumb_url,
-                caption    = excluded.caption,
-                owner      = excluded.owner,
-                collection = CASE WHEN excluded.collection != ''
-                                  THEN excluded.collection ELSE items.collection END,
-                unsaved    = 0
+                thumb_url      = excluded.thumb_url,
+                caption        = excluded.caption,
+                owner          = excluded.owner,
+                collection     = CASE WHEN excluded.collection != ''
+                                      THEN excluded.collection ELSE items.collection END,
+                audio_url      = excluded.audio_url,
+                audio_title    = excluded.audio_title,
+                audio_artist   = excluded.audio_artist,
+                audio_kind     = excluded.audio_kind,
+                audio_asset_id = excluded.audio_asset_id,
+                unsaved        = 0
             """,
-            [{**row, "discovered_at": row.get("discovered_at") or _now()} for row in rows],
+            [_normalise(row) for row in rows],
         )
     return len(rows) - len(existing)
 
@@ -142,13 +210,30 @@ def mark_unsaved(keep: set[str]) -> int:
         return cur.rowcount
 
 
-def _filters(search: str, kind: str, state: str, collection: str):
+def _filters(
+    search: str = "",
+    kind: str = "all",
+    state: str = "all",
+    collection: str = "",
+    audio: str = "any",
+    artist: str = "",
+    owner: str = "",
+    duration: str = "any",
+):
+    """Build the WHERE clause every query, count and bulk-select shares.
+
+    Everything funnels through here so a new filter automatically applies to the
+    grid, the sidebar counts and "select all matching" at once.
+    """
     where = ["i.unsaved = 0"]
     params: list[Any] = []
 
     if search:
-        where.append("(i.caption LIKE ? OR i.owner LIKE ?)")
-        params += [f"%{search}%", f"%{search}%"]
+        where.append(
+            "(i.caption LIKE ? OR i.owner LIKE ? "
+            "OR i.audio_title LIKE ? OR i.audio_artist LIKE ?)"
+        )
+        params += [f"%{search}%"] * 4
 
     if kind == "video":
         where.append("i.is_video = 1")
@@ -168,29 +253,59 @@ def _filters(search: str, kind: str, state: str, collection: str):
         where.append("i.collection = ?")
         params.append(collection)
 
+    if audio == "original":
+        where.append("i.audio_kind = 'original'")
+    elif audio == "licensed":
+        where.append("i.audio_kind = 'music'")
+    elif audio == "any_audio":
+        where.append("i.audio_kind != ''")
+    elif audio == "none":
+        where.append("(i.audio_kind IS NULL OR i.audio_kind = '')")
+
+    if artist:
+        where.append("i.audio_artist LIKE ?")
+        params.append(f"%{artist}%")
+
+    if owner:
+        where.append("i.owner LIKE ?")
+        params.append(f"%{owner}%")
+
+    # Durations are only meaningful for videos; photos have NULL.
+    if duration == "short":
+        where.append("i.video_duration > 0 AND i.video_duration < 30")
+    elif duration == "medium":
+        where.append("i.video_duration >= 30 AND i.video_duration <= 60")
+    elif duration == "long":
+        where.append("i.video_duration > 60")
+
     return " AND ".join(where), params
 
 
+# Accepted filter keys, so callers can forward request args without spelling
+# every parameter out three times over.
+FILTER_KEYS = ("search", "kind", "state", "collection", "audio", "artist", "owner", "duration")
+
+ORDERS = {
+    "newest": "i.taken_at DESC",
+    "oldest": "i.taken_at ASC",
+    "owner": "i.owner ASC, i.taken_at DESC",
+    "added": "i.discovered_at DESC",
+    "longest": "i.video_duration DESC NULLS LAST",
+    "shortest": "i.video_duration ASC NULLS LAST",
+    "artist": "i.audio_artist ASC, i.taken_at DESC",
+}
+
+
 def query_items(
-    search: str = "",
-    kind: str = "all",
-    state: str = "all",
-    collection: str = "",
-    sort: str = "newest",
-    limit: int = 200,
-    offset: int = 0,
+    sort: str = "newest", limit: int = 200, offset: int = 0, **filters: Any
 ) -> list[dict[str, Any]]:
-    clause, params = _filters(search, kind, state, collection)
-    order = {
-        "newest": "i.taken_at DESC",
-        "oldest": "i.taken_at ASC",
-        "owner": "i.owner ASC, i.taken_at DESC",
-        "added": "i.discovered_at DESC",
-    }.get(sort, "i.taken_at DESC")
+    clause, params = _filters(**filters)
+    order = ORDERS.get(sort, ORDERS["newest"])
 
     sql = f"""
         SELECT i.*, d.status AS download_status, d.path AS download_path,
-               d.bytes AS download_bytes, d.error AS download_error
+               d.bytes AS download_bytes, d.error AS download_error,
+               d.mode AS download_mode
         FROM items i
         LEFT JOIN downloads d ON d.shortcode = i.shortcode
         WHERE {clause}
@@ -200,10 +315,8 @@ def query_items(
     return [dict(r) for r in connection().execute(sql, params + [limit, offset])]
 
 
-def count_items(
-    search: str = "", kind: str = "all", state: str = "all", collection: str = ""
-) -> int:
-    clause, params = _filters(search, kind, state, collection)
+def count_items(**filters: Any) -> int:
+    clause, params = _filters(**filters)
     sql = f"""
         SELECT COUNT(*) FROM items i
         LEFT JOIN downloads d ON d.shortcode = i.shortcode
@@ -212,17 +325,26 @@ def count_items(
     return connection().execute(sql, params).fetchone()[0]
 
 
-def all_shortcodes(
-    search: str = "", kind: str = "all", state: str = "all", collection: str = ""
-) -> list[str]:
+def all_shortcodes(**filters: Any) -> list[str]:
     """Every shortcode matching a filter - used by 'select all matching'."""
-    clause, params = _filters(search, kind, state, collection)
+    clause, params = _filters(**filters)
     sql = f"""
         SELECT i.shortcode FROM items i
         LEFT JOIN downloads d ON d.shortcode = i.shortcode
         WHERE {clause} ORDER BY i.taken_at DESC
     """
     return [r["shortcode"] for r in connection().execute(sql, params)]
+
+
+def artists(limit: int = 200) -> list[str]:
+    """Artists actually present, for the filter's autocomplete list."""
+    rows = connection().execute(
+        """SELECT audio_artist, COUNT(*) AS n FROM items
+           WHERE unsaved = 0 AND audio_artist != ''
+           GROUP BY audio_artist ORDER BY n DESC LIMIT ?""",
+        (limit,),
+    )
+    return [r["audio_artist"] for r in rows]
 
 
 def get_item(shortcode: str) -> dict[str, Any] | None:
@@ -294,31 +416,41 @@ def record_download(
     size: int = 0,
     files: int = 0,
     error: str = "",
+    mode: str = "full",
 ) -> None:
     with transaction() as conn:
         conn.execute(
             """
             INSERT INTO downloads (shortcode, status, path, bytes, files, error,
-                                   attempts, completed_at)
-            VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+                                   mode, attempts, completed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
             ON CONFLICT(shortcode) DO UPDATE SET
                 status       = excluded.status,
                 path         = excluded.path,
                 bytes        = excluded.bytes,
                 files        = excluded.files,
                 error        = excluded.error,
+                mode         = excluded.mode,
                 attempts     = downloads.attempts + 1,
                 completed_at = excluded.completed_at
             """,
-            (shortcode, status, path, size, files, error, _now()),
+            (shortcode, status, path, size, files, error, mode, _now()),
         )
 
 
-def is_downloaded(shortcode: str) -> bool:
+def is_downloaded(shortcode: str, mode: str = "full") -> bool:
+    """Has this item already been fetched to satisfy `mode`?
+
+    A full download satisfies an audio-only request, but not the reverse -
+    otherwise an audio-only grab would block ever fetching the video.
+    """
     row = connection().execute(
-        "SELECT 1 FROM downloads WHERE shortcode = ? AND status = 'done'", (shortcode,)
+        "SELECT mode FROM downloads WHERE shortcode = ? AND status = 'done'",
+        (shortcode,),
     ).fetchone()
-    return row is not None
+    if row is None:
+        return False
+    return True if mode == "audio" else (row["mode"] or "full") == "full"
 
 
 def stats() -> dict[str, Any]:
@@ -336,6 +468,12 @@ def stats() -> dict[str, Any]:
     videos = conn.execute(
         "SELECT COUNT(*) FROM items WHERE unsaved = 0 AND is_video = 1"
     ).fetchone()[0]
+    original = conn.execute(
+        "SELECT COUNT(*) FROM items WHERE unsaved = 0 AND audio_kind = 'original'"
+    ).fetchone()[0]
+    licensed = conn.execute(
+        "SELECT COUNT(*) FROM items WHERE unsaved = 0 AND audio_kind = 'music'"
+    ).fetchone()[0]
     return {
         "total": total,
         "downloaded": done,
@@ -344,6 +482,9 @@ def stats() -> dict[str, Any]:
         "videos": videos,
         "photos": max(total - videos, 0),
         "bytes": size,
+        "audio_original": original,
+        "audio_licensed": licensed,
+        "audio_none": max(total - original - licensed, 0),
     }
 
 
