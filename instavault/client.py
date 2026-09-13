@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 import instaloader
+import requests
 from instaloader import exceptions as ie
 
 from . import config, events
@@ -657,13 +658,23 @@ def _safe_folder(folder: str) -> str:
     return "/".join(segments) or "saved"
 
 
+_BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+)
+
+# The CDN and the API want opposite things: signing a CDN request with the
+# API session's headers gets a 404, while a plain anonymous GET succeeds.
+_cdn = requests.Session()
+_cdn.headers.update({"User-Agent": _BROWSER_UA})
+
+
 def _fetch_to_file(url: str, dest: Path, stop: threading.Event | None = None) -> int:
-    """Stream a URL to disk through the authenticated session."""
-    loader = require_loader()
+    """Stream a CDN URL to disk, unauthenticated."""
     dest.parent.mkdir(parents=True, exist_ok=True)
 
     written = 0
-    with loader.context._session.get(url, stream=True, timeout=60) as response:
+    with _cdn.get(url, stream=True, timeout=60) as response:
         response.raise_for_status()
         with open(dest, "wb") as handle:
             for chunk in response.iter_content(chunk_size=64 * 1024):
@@ -675,6 +686,19 @@ def _fetch_to_file(url: str, dest: Path, stop: threading.Event | None = None) ->
     if written == 0:
         dest.unlink(missing_ok=True)
     return written
+
+
+def resolve_audio(shortcode: str) -> dict[str, Any]:
+    """Fetch current audio details for one item.
+
+    Stored CDN links are short-lived, so a download re-resolves rather than
+    trusting whatever the last sync recorded.
+    """
+    loader = require_loader()
+    media_id = instaloader.Post.shortcode_to_mediaid(shortcode)
+    data = loader.context.get_iphone_json(f"api/v1/media/{media_id}/info/", {})
+    items = data.get("items") or []
+    return _audio_meta(items[0]) if items else {}
 
 
 def _purge_video(paths: list[Path]) -> int:
@@ -708,28 +732,41 @@ def download_item(
     folder_dir = config.DOWNLOAD_DIR / safe_folder
 
     # Creator sound: straight download, no video fetched.
-    if mode == "audio" and audio_kind == "original" and audio_url:
+    if mode == "audio" and audio_kind == "original":
         dest = folder_dir / f"{shortcode}.m4a"
         if dest.exists() and dest.stat().st_size > 0:
             size, files = _file_stats([dest])
             return {"shortcode": shortcode, "ok": True, "path": str(folder_dir),
                     "bytes": size, "files": files, "audio_tracks": 1, "mode": "audio"}
-        try:
-            limiter.wait(stop)
-            written = _fetch_to_file(audio_url, dest, stop)
-            if written > 0:
-                limiter.relax()
-                return {"shortcode": shortcode, "ok": True, "path": str(folder_dir),
-                        "bytes": written, "files": 1, "audio_tracks": 1, "mode": "audio"}
-        except Cancelled:
-            raise
-        except Exception as exc:
-            # URL has almost certainly expired; the video route still works.
-            events.log(
-                f"{shortcode}: direct audio fetch failed ({exc}); "
-                f"extracting from the video instead.",
-                "warn",
-            )
+
+        # The stored link may have expired; re-resolve once before giving up.
+        for candidate_url, refreshed in ((audio_url, False), (None, True)):
+            if stop is not None and stop.is_set():
+                raise Cancelled()
+            try:
+                if refreshed:
+                    limiter.wait(stop)
+                    candidate_url = (resolve_audio(shortcode) or {}).get("audio_url", "")
+                if not candidate_url:
+                    continue
+
+                written = _fetch_to_file(candidate_url, dest, stop)
+                if written > 0:
+                    limiter.relax()
+                    return {
+                        "shortcode": shortcode, "ok": True, "path": str(folder_dir),
+                        "bytes": written, "files": 1, "audio_tracks": 1,
+                        "mode": "audio", "audio_url": candidate_url,
+                    }
+            except Cancelled:
+                raise
+            except Exception as exc:
+                if refreshed:
+                    events.log(
+                        f"{shortcode}: audio fetch failed ({exc}); "
+                        f"falling back to the video.",
+                        "warn",
+                    )
     attempts = max(1, config.MAX_RETRIES)
     last_error: Exception | None = None
 
