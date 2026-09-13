@@ -2,6 +2,7 @@
 
 import os
 import shutil
+from functools import lru_cache
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -67,8 +68,36 @@ PORT = _int("FLASK_PORT", 5000)
 DEBUG = _bool("FLASK_DEBUG", False)
 
 
+@lru_cache(maxsize=1)
 def ffmpeg_path() -> str | None:
-    return shutil.which("ffmpeg")
+    """Locate ffmpeg, tolerating a PATH that hasn't been refreshed.
+
+    A fresh winget or choco install updates PATH for *new* processes only, so
+    an already-running app would keep reporting it missing. Fall back to the
+    usual install locations before giving up.
+    """
+    explicit = os.getenv("FFMPEG_PATH", "").strip().strip('"')
+    if explicit and Path(explicit).is_file():
+        return explicit
+
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+
+    local = Path(os.getenv("LOCALAPPDATA", ""))
+    candidates = [
+        (local / "Microsoft/WinGet/Packages", "Gyan.FFmpeg*/**/bin/ffmpeg.exe"),
+        (local / "Microsoft/WinGet/Links", "ffmpeg.exe"),
+        (Path(os.getenv("ProgramData", "")) / "chocolatey/bin", "ffmpeg.exe"),
+        (Path("C:/ffmpeg"), "**/bin/ffmpeg.exe"),
+    ]
+    for root, pattern in candidates:
+        if not root.exists():
+            continue
+        for match in sorted(root.glob(pattern), reverse=True):   # newest first
+            if match.is_file():
+                return str(match)
+    return None
 
 
 def ensure_dirs() -> None:
