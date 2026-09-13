@@ -588,12 +588,78 @@ def fetch_collections() -> list[dict[str, Any]]:
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 VIDEO_SUFFIXES = {".mp4", ".mov"}
 
-# Files land flat in the collection folder, named by shortcode, so one item's
-# files are simply everything sharing that prefix.
+# Files are named for readability but always carry the shortcode, so an item's
+# files can still be found. Matching on substring rather than a glob keeps the
+# brackets in "[shortcode]" from being read as a character class.
 def _item_files(folder_dir: Path, shortcode: str) -> list[Path]:
     if not folder_dir.exists():
         return []
-    return sorted(p for p in folder_dir.glob(f"{shortcode}*") if p.is_file())
+    return sorted(p for p in folder_dir.iterdir() if p.is_file() and shortcode in p.name)
+
+
+# Characters Windows forbids in a filename, plus control codes.
+_ILLEGAL = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+# Pictographs and flags only - every actual script is left intact, so Telugu,
+# Devanagari, Japanese and Chinese titles survive unchanged.
+_EMOJI = re.compile(
+    "[\U0001f300-\U0001faff\U00002600-\U000027bf\U0001f1e6-\U0001f1ff️‍]+"
+)
+
+# Keeps the longest path comfortably inside the Windows 260-character limit.
+NAME_LIMIT = 110
+
+
+def _safe_name(text: Any, limit: int = 60) -> str:
+    """Make a filename fragment safe without flattening non-Latin scripts."""
+    cleaned = _EMOJI.sub("", str(text or ""))
+    cleaned = _ILLEGAL.sub("", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
+    return cleaned[:limit].strip(" .")
+
+
+def build_name(meta: dict[str, Any], mode: str = "full") -> str:
+    """A descriptive base filename, ending in the shortcode for uniqueness."""
+    shortcode = meta.get("shortcode", "item")
+
+    if mode == "audio":
+        artist = _safe_name(meta.get("audio_artist") or meta.get("owner"), 40)
+        title = _safe_name(meta.get("audio_title"), 60)
+        parts = [p for p in (artist, title) if p]
+    else:
+        owner = _safe_name(meta.get("owner"), 30)
+        date = str(meta.get("taken_at") or "")[:10]
+        caption = _safe_name(meta.get("caption"), 50)
+        parts = [p for p in (owner, date, caption) if p]
+
+    base = " - ".join(parts) or _safe_name(meta.get("owner")) or "item"
+    return f"{base[:NAME_LIMIT].strip(' .-')} [{shortcode}]"
+
+
+def _rename_item_files(paths: list[Path], base: str) -> list[Path]:
+    """Rename downloaded files to the readable scheme, keeping extensions."""
+    renamed = []
+    for path in paths:
+        # Instaloader suffixes carousel members _1, _2 - keep that ordering.
+        match = re.search(r"_(\d+)$", path.stem)
+        index = f" {match.group(1)}" if match else ""
+        target = path.with_name(f"{base}{index}{path.suffix}")
+
+        if target == path:
+            renamed.append(path)
+            continue
+
+        counter = 2
+        while target.exists():
+            target = path.with_name(f"{base}{index} ({counter}){path.suffix}")
+            counter += 1
+
+        try:
+            path.rename(target)
+            renamed.append(target)
+        except OSError:
+            renamed.append(path)   # keep the original rather than lose the file
+    return renamed
 
 
 def _file_stats(paths: list[Path]) -> tuple[int, int]:
@@ -719,6 +785,7 @@ def download_item(
     mode: str = "full",
     audio_url: str = "",
     audio_kind: str = "",
+    meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Download one item into its own folder, retrying transient failures.
 
@@ -730,12 +797,21 @@ def download_item(
     loader = require_loader()
     safe_folder = _safe_folder(folder)
     folder_dir = config.DOWNLOAD_DIR / safe_folder
+    meta = {**(meta or {}), "shortcode": shortcode}
+    base_name = build_name(meta, mode)
 
     # Creator sound: straight download, no video fetched.
     if mode == "audio" and audio_kind == "original":
-        dest = folder_dir / f"{shortcode}.m4a"
-        if dest.exists() and dest.stat().st_size > 0:
-            size, files = _file_stats([dest])
+        dest = folder_dir / f"{base_name}.m4a"
+
+        # Match on the shortcode, so an audio file saved under the older naming
+        # still counts as present rather than being fetched again.
+        existing = [
+            p for p in _item_files(folder_dir, shortcode)
+            if p.suffix.lower() in {".m4a", ".aac", ".mp3"} and p.stat().st_size > 0
+        ]
+        if existing:
+            size, files = _file_stats(existing)
             return {"shortcode": shortcode, "ok": True, "path": str(folder_dir),
                     "bytes": size, "files": files, "audio_tracks": 1, "mode": "audio"}
 
@@ -788,6 +864,10 @@ def download_item(
             paths = _item_files(folder_dir, shortcode)
             if not paths:
                 raise RuntimeError("Instagram returned no media for this item.")
+
+            # Instaloader names files by shortcode and timestamp; swap in
+            # something readable before anything else touches them.
+            paths = _rename_item_files(paths, base_name)
 
             audio = 0
             want_audio = (

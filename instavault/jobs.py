@@ -248,6 +248,7 @@ class JobManager:
                     mode=mode,
                     audio_url=item.get("audio_url") or "",
                     audio_kind=item.get("audio_kind") or "",
+                    meta=item,
                 )
 
                 if result.get("ok"):
