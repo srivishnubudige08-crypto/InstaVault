@@ -584,21 +584,47 @@ def fetch_collections() -> list[dict[str, Any]]:
 # --------------------------------------------------------------------- downloads
 
 
-def _dir_stats(path: Path) -> tuple[int, int]:
-    if not path.exists():
-        return 0, 0
-    files = [p for p in path.rglob("*") if p.is_file()]
-    return sum(p.stat().st_size for p in files), len(files)
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
+VIDEO_SUFFIXES = {".mp4", ".mov"}
+
+# Files land flat in the collection folder, named by shortcode, so one item's
+# files are simply everything sharing that prefix.
+def _item_files(folder_dir: Path, shortcode: str) -> list[Path]:
+    if not folder_dir.exists():
+        return []
+    return sorted(p for p in folder_dir.glob(f"{shortcode}*") if p.is_file())
 
 
-def _extract_audio(item_dir: Path) -> int:
-    """Split the audio track out of any downloaded video. Needs ffmpeg."""
+def _file_stats(paths: list[Path]) -> tuple[int, int]:
+    total = 0
+    for path in paths:
+        try:
+            total += path.stat().st_size
+        except OSError:
+            pass
+    return total, len(paths)
+
+
+def _strip_images(paths: list[Path]) -> int:
+    """Drop poster/thumbnail images; only the media itself is wanted."""
+    removed = 0
+    for path in paths:
+        if path.suffix.lower() in IMAGE_SUFFIXES:
+            path.unlink(missing_ok=True)
+            removed += 1
+    return removed
+
+
+def _extract_audio(videos: list[Path]) -> int:
+    """Split the audio track out of downloaded videos. Needs ffmpeg."""
     ffmpeg = config.ffmpeg_path()
     if not ffmpeg:
         return 0
 
     made = 0
-    for video in list(item_dir.glob("*.mp4")):
+    for video in videos:
+        if video.suffix.lower() not in VIDEO_SUFFIXES:
+            continue
         target = video.with_suffix(".m4a")
         if target.exists():
             continue
@@ -640,11 +666,11 @@ def _fetch_to_file(url: str, dest: Path, stop: threading.Event | None = None) ->
     return written
 
 
-def _purge_video(item_dir: Path) -> int:
+def _purge_video(paths: list[Path]) -> int:
     """Drop video and poster files, leaving audio behind."""
     removed = 0
-    for path in list(item_dir.iterdir()) if item_dir.exists() else []:
-        if path.is_file() and path.suffix.lower() in {".mp4", ".mov", ".jpg", ".jpeg", ".webp"}:
+    for path in paths:
+        if path.suffix.lower() in VIDEO_SUFFIXES | IMAGE_SUFFIXES:
             path.unlink(missing_ok=True)
             removed += 1
     return removed
@@ -668,21 +694,21 @@ def download_item(
     """
     loader = require_loader()
     safe_folder = _safe_folder(folder)
-    item_dir = config.DOWNLOAD_DIR / safe_folder / shortcode
+    folder_dir = config.DOWNLOAD_DIR / safe_folder
 
     # Creator sound: straight download, no video fetched.
     if mode == "audio" and audio_kind == "original" and audio_url:
-        dest = item_dir / f"{shortcode}.m4a"
+        dest = folder_dir / f"{shortcode}.m4a"
         if dest.exists() and dest.stat().st_size > 0:
-            size, files = _dir_stats(item_dir)
-            return {"shortcode": shortcode, "ok": True, "path": str(item_dir),
+            size, files = _file_stats([dest])
+            return {"shortcode": shortcode, "ok": True, "path": str(folder_dir),
                     "bytes": size, "files": files, "audio_tracks": 1, "mode": "audio"}
         try:
             limiter.wait(stop)
             written = _fetch_to_file(audio_url, dest, stop)
             if written > 0:
                 limiter.relax()
-                return {"shortcode": shortcode, "ok": True, "path": str(item_dir),
+                return {"shortcode": shortcode, "ok": True, "path": str(folder_dir),
                         "bytes": written, "files": 1, "audio_tracks": 1, "mode": "audio"}
         except Cancelled:
             raise
@@ -704,14 +730,15 @@ def download_item(
             limiter.wait(stop)
             post = instaloader.Post.from_shortcode(loader.context, shortcode)
 
-            item_dir.mkdir(parents=True, exist_ok=True)
-            # A literal dirname_pattern puts every item in its own folder, which
-            # makes byte accounting and resume checks trivial.
-            loader.dirname_pattern = str(item_dir)
+            folder_dir.mkdir(parents=True, exist_ok=True)
+            # Files land flat in the collection folder. Instaloader names them
+            # by shortcode, so one item's files are its prefix - no per-item
+            # directory needed to keep them apart.
+            loader.dirname_pattern = str(folder_dir)
             loader.download_post(post, target=shortcode)
 
-            size, files = _dir_stats(item_dir)
-            if files == 0:
+            paths = _item_files(folder_dir, shortcode)
+            if not paths:
                 raise RuntimeError("Instagram returned no media for this item.")
 
             audio = 0
@@ -720,9 +747,8 @@ def download_item(
                 or (config.EXTRACT_AUDIO if extract_audio is None else extract_audio)
             )
             if want_audio and post.is_video:
-                audio = _extract_audio(item_dir)
-                if audio:
-                    size, files = _dir_stats(item_dir)
+                audio = _extract_audio(paths)
+                paths = _item_files(folder_dir, shortcode)
 
             if mode == "audio":
                 if not audio:
@@ -733,14 +759,27 @@ def download_item(
                         else "the audio track could not be extracted."
                     )
                     return {"shortcode": shortcode, "ok": False, "error": reason}
-                _purge_video(item_dir)
-                size, files = _dir_stats(item_dir)
+                _purge_video(paths)
+            elif not config.KEEP_IMAGES:
+                # Poster thumbnails are noise next to the media itself.
+                _strip_images(paths)
+
+            paths = _item_files(folder_dir, shortcode)
+            if not paths:
+                # Everything this item had was images, and images aren't kept.
+                return {
+                    "shortcode": shortcode,
+                    "ok": False,
+                    "error": "Photo post - images are not being saved "
+                             "(set KEEP_IMAGES=true in .env to keep them).",
+                }
+            size, files = _file_stats(paths)
 
             limiter.relax()
             return {
                 "shortcode": shortcode,
                 "ok": True,
-                "path": str(item_dir),
+                "path": str(folder_dir),
                 "bytes": size,
                 "files": files,
                 "audio_tracks": audio,

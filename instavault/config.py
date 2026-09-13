@@ -58,6 +58,10 @@ MAX_RETRIES = _int("MAX_RETRIES", 3)
 # Pull the reel's audio track out into a separate .m4a. Needs ffmpeg on PATH.
 EXTRACT_AUDIO = _bool("EXTRACT_AUDIO", False)
 
+# Keep images: poster thumbnails beside videos, and photo posts themselves.
+# Off by default - the media is what's wanted, not the stills.
+KEEP_IMAGES = _bool("KEEP_IMAGES", False)
+
 HOST = os.getenv("FLASK_HOST", "127.0.0.1")
 PORT = _int("FLASK_PORT", 5000)
 DEBUG = _bool("FLASK_DEBUG", False)
