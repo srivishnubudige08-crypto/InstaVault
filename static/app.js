@@ -586,13 +586,10 @@ function renderSelection() {
 }
 
 function downloadFolder() {
-  // Audio-only runs go to their own folder so they never land on top of the
-  // videos; a collection filter nests underneath it.
-  const collection = state.collectionNames?.[state.filters.collection] || "";
-  if (state.mode === "audio") {
-    return collection ? `audio/${collection}` : "audio";
-  }
-  return collection || "saved";
+  // Only matters for video: audio is always classified server-side into
+  // audio/Original Sounds/<account>/ or audio/Licensed Music/<artist>/,
+  // regardless of what's passed here.
+  return state.collectionNames?.[state.filters.collection] || "saved";
 }
 
 document.querySelectorAll(".seg[data-mode]").forEach((btn) => {

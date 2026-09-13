@@ -261,6 +261,7 @@ class JobManager:
                         size=result.get("bytes", 0),
                         files=result.get("files", 0),
                         mode=mode,
+                        filenames=result.get("filenames", []),
                     )
                     events.publish(
                         "item", shortcode=shortcode, status="done",

@@ -588,9 +588,9 @@ def fetch_collections() -> list[dict[str, Any]]:
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 VIDEO_SUFFIXES = {".mp4", ".mov"}
 
-# Files are named for readability but always carry the shortcode, so an item's
-# files can still be found. Matching on substring rather than a glob keeps the
-# brackets in "[shortcode]" from being read as a character class.
+# Right after Instaloader writes a file it still carries its own naming
+# pattern ("{shortcode}_{date}"), so this only needs to work at that moment -
+# the file is renamed to its final name immediately afterward.
 def _item_files(folder_dir: Path, shortcode: str) -> list[Path]:
     if not folder_dir.exists():
         return []
@@ -619,41 +619,53 @@ def _safe_name(text: Any, limit: int = 60) -> str:
 
 
 def build_name(meta: dict[str, Any], mode: str = "full") -> str:
-    """A descriptive base filename, ending in the shortcode for uniqueness."""
-    shortcode = meta.get("shortcode", "item")
+    """The base filename: just the account for video, just the title for audio.
 
+    Collisions (the same account saved many times, or a repeated generic title
+    like Instagram's default "Original audio") are resolved separately by
+    _unique_path, which appends " (2)", " (3)" - so this only has to decide
+    what the *ideal* name is, not guarantee it's free.
+    """
     if mode == "audio":
-        artist = _safe_name(meta.get("audio_artist") or meta.get("owner"), 40)
-        title = _safe_name(meta.get("audio_title"), 60)
-        parts = [p for p in (artist, title) if p]
-    else:
-        owner = _safe_name(meta.get("owner"), 30)
-        date = str(meta.get("taken_at") or "")[:10]
-        caption = _safe_name(meta.get("caption"), 50)
-        parts = [p for p in (owner, date, caption) if p]
-
-    base = " - ".join(parts) or _safe_name(meta.get("owner")) or "item"
-    return f"{base[:NAME_LIMIT].strip(' .-')} [{shortcode}]"
+        return _safe_name(meta.get("audio_title"), NAME_LIMIT) or "Untitled"
+    return _safe_name(meta.get("owner"), NAME_LIMIT) or "unknown"
 
 
-def _rename_item_files(paths: list[Path], base: str) -> list[Path]:
+def audio_destination(kind: str, artist: str) -> str:
+    """Classification folder for an audio download, relative to downloads/.
+
+    audio/Original Sounds/<account>/ for creator-made sounds, grouped by the
+    account that made them; audio/Licensed Music/<artist>/ for catalog tracks,
+    grouped by the recording artist. The artist column already holds whichever
+    is right for the kind, so one function covers both.
+    """
+    bucket = "Original Sounds" if kind == "original" else "Licensed Music"
+    who = _safe_name(artist, 40) or "Unknown artist"
+    return f"audio/{bucket}/{who}"
+
+
+def _unique_path(directory: Path, base: str, suffix: str) -> Path:
+    """A path guaranteed not to already exist, numbering on collision."""
+    candidate = directory / f"{base}{suffix}"
+    counter = 2
+    while candidate.exists():
+        candidate = directory / f"{base} ({counter}){suffix}"
+        counter += 1
+    return candidate
+
+
+def _rename_item_files(paths: list[Path], directory: Path, base: str) -> list[Path]:
     """Rename downloaded files to the readable scheme, keeping extensions."""
     renamed = []
     for path in paths:
         # Instaloader suffixes carousel members _1, _2 - keep that ordering.
         match = re.search(r"_(\d+)$", path.stem)
         index = f" {match.group(1)}" if match else ""
-        target = path.with_name(f"{base}{index}{path.suffix}")
+        target = _unique_path(directory, f"{base}{index}", path.suffix)
 
         if target == path:
             renamed.append(path)
             continue
-
-        counter = 2
-        while target.exists():
-            target = path.with_name(f"{base}{index} ({counter}){path.suffix}")
-            counter += 1
-
         try:
             path.rename(target)
             renamed.append(target)
@@ -682,18 +694,23 @@ def _strip_images(paths: list[Path]) -> int:
     return removed
 
 
-def _extract_audio(videos: list[Path]) -> int:
-    """Split the audio track out of downloaded videos. Needs ffmpeg."""
+def _extract_audio(videos: list[Path]) -> list[Path]:
+    """Split the audio track out of downloaded videos. Needs ffmpeg.
+
+    Returns the audio files actually created, so the caller can add them to its
+    file list without re-scanning the folder.
+    """
     ffmpeg = config.ffmpeg_path()
     if not ffmpeg:
-        return 0
+        return []
 
-    made = 0
+    created = []
     for video in videos:
         if video.suffix.lower() not in VIDEO_SUFFIXES:
             continue
         target = video.with_suffix(".m4a")
         if target.exists():
+            created.append(target)
             continue
         for args in (
             [ffmpeg, "-y", "-i", str(video), "-vn", "-acodec", "copy", str(target)],
@@ -702,22 +719,22 @@ def _extract_audio(videos: list[Path]) -> int:
             try:
                 result = subprocess.run(args, capture_output=True, timeout=120)
                 if result.returncode == 0 and target.exists():
-                    made += 1
+                    created.append(target)
                     break
             except Exception:
                 continue
-    return made
+    return created
 
 
 def _safe_folder(folder: str) -> str:
-    """Sanitise a destination folder, allowing one level of nesting.
+    """Sanitise a destination folder, allowing nested subfolders.
 
-    "audio/movie" is kept as a real subfolder so audio-only runs don't land on
-    top of the videos, while each segment is still stripped of anything that
-    could escape the downloads directory.
+    Each segment keeps only alphanumerics, spaces, hyphens and underscores -
+    "." is not in that set, so a ".." segment collapses to nothing and cannot
+    walk the path back out of the downloads directory, whatever the depth.
     """
     segments = []
-    for segment in str(folder).split("/")[:2]:
+    for segment in str(folder).split("/")[:4]:
         clean = "".join(c for c in segment if c.isalnum() or c in " -_").strip()
         if clean:
             segments.append(clean)
@@ -767,14 +784,12 @@ def resolve_audio(shortcode: str) -> dict[str, Any]:
     return _audio_meta(items[0]) if items else {}
 
 
-def _purge_video(paths: list[Path]) -> int:
-    """Drop video and poster files, leaving audio behind."""
-    removed = 0
+def _purge(paths: list[Path], suffixes: set[str]) -> list[Path]:
+    """Delete files whose suffix matches, returning what's left."""
     for path in paths:
-        if path.suffix.lower() in VIDEO_SUFFIXES | IMAGE_SUFFIXES:
+        if path.suffix.lower() in suffixes:
             path.unlink(missing_ok=True)
-            removed += 1
-    return removed
+    return [p for p in paths if p.exists()]
 
 
 def download_item(
@@ -787,33 +802,31 @@ def download_item(
     audio_kind: str = "",
     meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Download one item into its own folder, retrying transient failures.
+    """Download one item, retrying transient failures.
 
-    mode "full" fetches the media as published. mode "audio" keeps only the
-    sound: a creator-made track is fetched directly from its own URL with no
-    video transfer at all, while anything else falls back to pulling the video
-    and extracting its published mix with ffmpeg.
+    mode "full" fetches the media as published, filed under `folder`, named for
+    the account. mode "audio" keeps only the sound, classified under
+    audio/Original Sounds/<account>/ or audio/Licensed Music/<artist>/
+    regardless of `folder`: a creator-made track is fetched directly with no
+    video transfer at all, while a licensed one falls back to pulling the video
+    and extracting its published mix with ffmpeg. Whatever gets downloaded to
+    reach that audio - the video, a poster - is always cleaned up, on both
+    success and failure, so a failed extraction never leaves debris behind.
     """
     loader = require_loader()
-    safe_folder = _safe_folder(folder)
-    folder_dir = config.DOWNLOAD_DIR / safe_folder
     meta = {**(meta or {}), "shortcode": shortcode}
     base_name = build_name(meta, mode)
 
-    # Creator sound: straight download, no video fetched.
-    if mode == "audio" and audio_kind == "original":
-        dest = folder_dir / f"{base_name}.m4a"
+    if mode == "audio":
+        safe_folder = _safe_folder(audio_destination(audio_kind, meta.get("audio_artist", "")))
+    else:
+        safe_folder = _safe_folder(folder)
+    folder_dir = config.DOWNLOAD_DIR / safe_folder
 
-        # Match on the shortcode, so an audio file saved under the older naming
-        # still counts as present rather than being fetched again.
-        existing = [
-            p for p in _item_files(folder_dir, shortcode)
-            if p.suffix.lower() in {".m4a", ".aac", ".mp3"} and p.stat().st_size > 0
-        ]
-        if existing:
-            size, files = _file_stats(existing)
-            return {"shortcode": shortcode, "ok": True, "path": str(folder_dir),
-                    "bytes": size, "files": files, "audio_tracks": 1, "mode": "audio"}
+    # Creator sound: straight download, no video fetched at all.
+    if mode == "audio" and audio_kind == "original":
+        folder_dir.mkdir(parents=True, exist_ok=True)
+        dest = _unique_path(folder_dir, base_name, ".m4a")
 
         # The stored link may have expired; re-resolve once before giving up.
         for candidate_url, refreshed in ((audio_url, False), (None, True)):
@@ -832,7 +845,7 @@ def download_item(
                     return {
                         "shortcode": shortcode, "ok": True, "path": str(folder_dir),
                         "bytes": written, "files": 1, "audio_tracks": 1,
-                        "mode": "audio", "audio_url": candidate_url,
+                        "mode": "audio", "filenames": [dest.name],
                     }
             except Cancelled:
                 raise
@@ -850,14 +863,15 @@ def download_item(
         if stop is not None and stop.is_set():
             raise Cancelled()
 
+        paths: list[Path] = []
         try:
             limiter.wait(stop)
             post = instaloader.Post.from_shortcode(loader.context, shortcode)
 
             folder_dir.mkdir(parents=True, exist_ok=True)
-            # Files land flat in the collection folder. Instaloader names them
-            # by shortcode, so one item's files are its prefix - no per-item
-            # directory needed to keep them apart.
+            # A literal dirname_pattern writes everything into one flat folder;
+            # Instaloader's own naming keeps one item's raw files apart until
+            # they're renamed below.
             loader.dirname_pattern = str(folder_dir)
             loader.download_post(post, target=shortcode)
 
@@ -865,34 +879,33 @@ def download_item(
             if not paths:
                 raise RuntimeError("Instagram returned no media for this item.")
 
-            # Instaloader names files by shortcode and timestamp; swap in
-            # something readable before anything else touches them.
-            paths = _rename_item_files(paths, base_name)
+            paths = _rename_item_files(paths, folder_dir, base_name)
 
-            audio = 0
+            audio_files: list[Path] = []
             want_audio = (
                 mode == "audio"
                 or (config.EXTRACT_AUDIO if extract_audio is None else extract_audio)
             )
             if want_audio and post.is_video:
-                audio = _extract_audio(paths)
-                paths = _item_files(folder_dir, shortcode)
+                audio_files = _extract_audio(paths)
+                paths = paths + audio_files
 
             if mode == "audio":
-                if not audio:
+                if not audio_files:
                     reason = (
                         "ffmpeg is not installed, so the audio could not be "
                         "extracted from the video."
                         if not config.ffmpeg_path()
                         else "the audio track could not be extracted."
                     )
+                    # Nothing useful came of this attempt - leave no trace,
+                    # including any corrupt partial output ffmpeg left behind.
+                    _purge(paths, VIDEO_SUFFIXES | IMAGE_SUFFIXES | {".m4a", ".aac"})
                     return {"shortcode": shortcode, "ok": False, "error": reason}
-                _purge_video(paths)
+                paths = _purge(paths, VIDEO_SUFFIXES | IMAGE_SUFFIXES)
             elif not config.KEEP_IMAGES:
-                # Poster thumbnails are noise next to the media itself.
-                _strip_images(paths)
+                paths = _purge(paths, IMAGE_SUFFIXES)
 
-            paths = _item_files(folder_dir, shortcode)
             if not paths:
                 # Everything this item had was images, and images aren't kept.
                 return {
@@ -910,15 +923,22 @@ def download_item(
                 "path": str(folder_dir),
                 "bytes": size,
                 "files": files,
-                "audio_tracks": audio,
+                "audio_tracks": len(audio_files),
                 "mode": mode,
+                "filenames": [p.name for p in paths],
             }
 
         except Cancelled:
+            # Don't leave a half-downloaded file behind for a cancelled job.
+            # `paths` reflects whatever this attempt last produced - raw
+            # Instaloader output if it failed early, renamed/extracted files if
+            # it failed late - so cleanup always targets what's really there.
+            _purge(paths, VIDEO_SUFFIXES | IMAGE_SUFFIXES | {".m4a", ".aac"})
             raise
         except Exception as exc:
             last_error = exc
             handle_auth_loss(exc)
+            _purge(paths, VIDEO_SUFFIXES | IMAGE_SUFFIXES | {".m4a", ".aac"})
 
             if isinstance(exc, AuthError) or is_session_expired(exc):
                 break

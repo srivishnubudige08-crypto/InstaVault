@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import mimetypes
 import os
 import subprocess
@@ -354,26 +355,29 @@ def thumb(shortcode: str):
 
 @app.get("/api/media/<shortcode>")
 def media(shortcode: str):
-    """Serve a downloaded file so the lightbox can play local copies."""
+    """Serve a downloaded file so the lightbox can play local copies.
+
+    Uses the exact filenames recorded at download time rather than scanning the
+    folder - collection folders hold many items' files side by side, so a
+    folder-wide scan would serve whichever file happened to be biggest, not
+    necessarily this item's.
+    """
     item = db.get_item(shortcode)
     if not item or not item.get("download_path"):
         return _error("Not downloaded yet.", 404)
 
     folder = Path(item["download_path"])
-    if not folder.exists():
-        return _error("Downloaded files are missing from disk.", 404)
+    names = json.loads(item.get("download_filenames") or "[]")
+    candidates = [folder / name for name in names if (folder / name).is_file()]
+    if not candidates:
+        return _error("Downloaded file is missing from disk.", 404)
 
     wanted = VIDEO_TYPES if item.get("is_video") else IMAGE_TYPES
-    files = sorted(
-        (p for p in folder.rglob("*") if p.is_file() and p.suffix.lower() in wanted),
-        key=lambda p: p.stat().st_size,
-        reverse=True,
-    )
-    if not files:
-        return _error("No playable file in that folder.", 404)
+    media_files = [p for p in candidates if p.suffix.lower() in wanted] or candidates
+    target = max(media_files, key=lambda p: p.stat().st_size)
 
-    mime = mimetypes.guess_type(files[0].name)[0] or "application/octet-stream"
-    return send_file(files[0], mimetype=mime, conditional=True)
+    mime = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+    return send_file(target, mimetype=mime, conditional=True)
 
 
 @app.post("/api/reveal")

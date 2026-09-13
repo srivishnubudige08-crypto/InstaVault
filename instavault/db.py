@@ -4,6 +4,7 @@ Keeps a local record so the app knows what it has already pulled, can filter and
 search without hitting Instagram, and can resume after a crash.
 """
 
+import json
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -93,6 +94,7 @@ MIGRATIONS: dict[str, dict[str, str]] = {
     },
     "downloads": {
         "mode": "TEXT DEFAULT 'full'",         # full | audio
+        "filenames": "TEXT DEFAULT '[]'",      # JSON list, relative to path
     },
 }
 
@@ -349,7 +351,8 @@ def artists(limit: int = 200) -> list[str]:
 
 def get_item(shortcode: str) -> dict[str, Any] | None:
     row = connection().execute(
-        """SELECT i.*, d.status AS download_status, d.path AS download_path
+        """SELECT i.*, d.status AS download_status, d.path AS download_path,
+                  d.mode AS download_mode, d.filenames AS download_filenames
            FROM items i LEFT JOIN downloads d ON d.shortcode = i.shortcode
            WHERE i.shortcode = ?""",
         (shortcode,),
@@ -363,7 +366,6 @@ def collections() -> list[dict[str, Any]]:
     Instagram gives us only the id over a cookie session, so an unnamed
     collection shows a short label the user can rename.
     """
-    import json
 
     names = json.loads(get_meta("collection_names", "{}") or "{}")
     rows = connection().execute(
@@ -386,7 +388,6 @@ def collections() -> list[dict[str, Any]]:
 
 
 def rename_collection(collection_id: str, name: str) -> None:
-    import json
 
     names = json.loads(get_meta("collection_names", "{}") or "{}")
     name = name.strip()
@@ -398,7 +399,6 @@ def rename_collection(collection_id: str, name: str) -> None:
 
 
 def collection_name(collection_id: str) -> str:
-    import json
 
     if not collection_id:
         return "saved"
@@ -417,13 +417,14 @@ def record_download(
     files: int = 0,
     error: str = "",
     mode: str = "full",
+    filenames: list[str] | None = None,
 ) -> None:
     with transaction() as conn:
         conn.execute(
             """
             INSERT INTO downloads (shortcode, status, path, bytes, files, error,
-                                   mode, attempts, completed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
+                                   mode, filenames, attempts, completed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
             ON CONFLICT(shortcode) DO UPDATE SET
                 status       = excluded.status,
                 path         = excluded.path,
@@ -431,11 +432,25 @@ def record_download(
                 files        = excluded.files,
                 error        = excluded.error,
                 mode         = excluded.mode,
+                filenames    = excluded.filenames,
                 attempts     = downloads.attempts + 1,
                 completed_at = excluded.completed_at
             """,
-            (shortcode, status, path, size, files, error, mode, _now()),
+            (shortcode, status, path, size, files, error, mode,
+             json.dumps(filenames or []), _now()),
         )
+
+
+def download_filenames(shortcode: str) -> list[str]:
+    row = connection().execute(
+        "SELECT filenames FROM downloads WHERE shortcode = ?", (shortcode,)
+    ).fetchone()
+    if not row or not row["filenames"]:
+        return []
+    try:
+        return json.loads(row["filenames"])
+    except (ValueError, TypeError):
+        return []
 
 
 def is_downloaded(shortcode: str, mode: str = "full") -> bool:
