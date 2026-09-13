@@ -643,7 +643,18 @@ def _extract_audio(videos: list[Path]) -> int:
 
 
 def _safe_folder(folder: str) -> str:
-    return "".join(c for c in folder if c.isalnum() or c in " -_") or "saved"
+    """Sanitise a destination folder, allowing one level of nesting.
+
+    "audio/movie" is kept as a real subfolder so audio-only runs don't land on
+    top of the videos, while each segment is still stripped of anything that
+    could escape the downloads directory.
+    """
+    segments = []
+    for segment in str(folder).split("/")[:2]:
+        clean = "".join(c for c in segment if c.isalnum() or c in " -_").strip()
+        if clean:
+            segments.append(clean)
+    return "/".join(segments) or "saved"
 
 
 def _fetch_to_file(url: str, dest: Path, stop: threading.Event | None = None) -> int:

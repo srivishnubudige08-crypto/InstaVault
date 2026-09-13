@@ -585,6 +585,16 @@ function renderSelection() {
     : `Download ${what || "selected"}`.trim();
 }
 
+function downloadFolder() {
+  // Audio-only runs go to their own folder so they never land on top of the
+  // videos; a collection filter nests underneath it.
+  const collection = state.collectionNames?.[state.filters.collection] || "";
+  if (state.mode === "audio") {
+    return collection ? `audio/${collection}` : "audio";
+  }
+  return collection || "saved";
+}
+
 document.querySelectorAll(".seg[data-mode]").forEach((btn) => {
   btn.addEventListener("click", () => {
     document.querySelectorAll(".seg[data-mode]").forEach((b) => b.classList.remove("active"));
@@ -667,7 +677,7 @@ $("download-btn").addEventListener("click", async () => {
       method: "POST",
       body: {
         shortcodes,
-        folder: state.collectionNames?.[state.filters.collection] || "saved",
+        folder: downloadFolder(),
         mode: state.mode,
       },
     });
@@ -946,7 +956,12 @@ function renderLightbox() {
   $("lightbox-download").onclick = async () => {
     await api("/api/download", {
       method: "POST",
-      body: { shortcodes: [item.shortcode], skip_existing: false, mode: state.mode },
+      body: {
+        shortcodes: [item.shortcode],
+        skip_existing: false,
+        mode: state.mode,
+        folder: downloadFolder(),
+      },
     });
     openDock();
     toast("Download queued", `@${item.owner}`);
