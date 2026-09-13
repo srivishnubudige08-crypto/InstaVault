@@ -729,13 +729,18 @@ def _extract_audio(videos: list[Path]) -> list[Path]:
 def _safe_folder(folder: str) -> str:
     """Sanitise a destination folder, allowing nested subfolders.
 
-    Each segment keeps only alphanumerics, spaces, hyphens and underscores -
-    "." is not in that set, so a ".." segment collapses to nothing and cannot
-    walk the path back out of the downloads directory, whatever the depth.
+    Dots are kept, since Instagram handles use them constantly ("3am.aura"),
+    but a segment that is only dots after cleaning ("." or "..") is dropped
+    rather than kept - that's the one shape that could walk the path back out
+    of the downloads directory, at any depth.
     """
     segments = []
     for segment in str(folder).split("/")[:4]:
-        clean = "".join(c for c in segment if c.isalnum() or c in " -_").strip()
+        clean = "".join(c for c in segment if c.isalnum() or c in " -_.")
+        # Strips both ends of whatever mix of spaces/dots sits there. A segment
+        # that was nothing *but* dots and spaces (".", "..", " . ") empties out
+        # completely here rather than surviving as a lone dot.
+        clean = clean.strip(" .")
         if clean:
             segments.append(clean)
     return "/".join(segments) or "saved"
