@@ -182,13 +182,20 @@ def stats():
 
 @app.get("/api/audio")
 def saved_audio():
-    """The saved-audio list, classified as creator-original or licensed."""
-    client.require_loader()
-    limit = request.args.get("limit", type=int)
-    tracks = audio.fetch_saved_audio(limit=limit)
-    if request.args.get("overlap") == "1":
-        tracks = audio.overlap_report(tracks)
-    return jsonify({"tracks": tracks, "count": len(tracks)})
+    """Tracks across the saved reels, classified as creator-original or licensed.
+
+    Sourced from the local index rather than Instagram's saved-audio endpoint,
+    which refuses cookie-session logins.
+    """
+    tracks = audio.tracks_from_index(**_filter_args())
+    return jsonify(
+        {
+            "tracks": tracks,
+            "count": len(tracks),
+            "original": sum(1 for t in tracks if t["kind"] == "original"),
+            "licensed": sum(1 for t in tracks if t["kind"] == "licensed"),
+        }
+    )
 
 
 @app.get("/api/audio/overlap")
@@ -209,14 +216,17 @@ def audio_overlap():
 
 @app.get("/api/audio/export")
 def audio_export():
-    """Download the saved-audio list as CSV or JSON."""
-    client.require_loader()
+    """Download the audio list as CSV or JSON.
+
+    Built from the local index, so it works offline and regardless of whether
+    Instagram's saved-audio endpoint is reachable - which it generally is not.
+    """
     fmt = request.args.get("fmt", "csv").lower()
     if fmt not in {"csv", "json"}:
         return _error("fmt must be 'csv' or 'json'.")
 
+    rows = audio.tracks_from_index(**_filter_args())
     kind = request.args.get("kind", "")          # original | licensed | ''
-    rows = audio.overlap_report()
     if kind in {"original", "licensed"}:
         rows = [r for r in rows if r["kind"] == kind]
 

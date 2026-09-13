@@ -104,6 +104,59 @@ def fetch_saved_audio(limit: int | None = None) -> list[dict[str, Any]]:
     return rows
 
 
+def tracks_from_index(**filters: Any) -> list[dict[str, Any]]:
+    """Distinct tracks across the saved reels already indexed.
+
+    Built entirely from local data, so it works regardless of whether
+    Instagram's saved-audio endpoint is reachable. One row per track, with the
+    reels that use it.
+    """
+    filters.setdefault("audio", "any_audio")
+    grouped: dict[str, dict[str, Any]] = {}
+
+    for item in db.query_items(limit=100_000, **filters):
+        kind = item.get("audio_kind") or ""
+        if not kind:
+            continue
+
+        # Instagram sometimes returns "0" for the asset id, which is no id at
+        # all - grouping on it would collapse unrelated sounds into one row.
+        asset_id = (item.get("audio_asset_id") or "").strip()
+        if asset_id in {"", "0"}:
+            asset_id = ""
+
+        title = (item.get("audio_title") or "").strip()
+        artist = (item.get("audio_artist") or "").strip()
+
+        if asset_id:
+            key = f"id:{asset_id}"
+        elif title or artist:
+            key = f"name:{title}|{artist}"
+        else:
+            # Nothing to identify it by; keep it as its own row rather than
+            # pooling every unlabelled sound together.
+            key = f"item:{item['shortcode']}"
+        track = grouped.setdefault(
+            key,
+            {
+                "title": title or "(untitled sound)",
+                "artist": artist,
+                "kind": "original" if kind == "original" else "licensed",
+                "asset_id": asset_id,
+                "duration_ms": None,
+                "reel_count": 0,
+                "reels": [],
+                "link": (
+                    f"https://www.instagram.com/reels/audio/{asset_id}/" if asset_id else ""
+                ),
+            },
+        )
+        track["reel_count"] += 1
+        track["reels"].append({"shortcode": item["shortcode"], "owner": item.get("owner", "")})
+
+    return sorted(grouped.values(), key=lambda t: (-t["reel_count"], t["title"].lower()))
+
+
 def overlap_report(tracks: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     """Match saved tracks against the sounds of reels already in the index.
 
