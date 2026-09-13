@@ -619,29 +619,37 @@ def _safe_name(text: Any, limit: int = 60) -> str:
 
 
 def build_name(meta: dict[str, Any], mode: str = "full") -> str:
-    """The base filename: just the account for video, just the title for audio.
+    """The base filename.
 
-    Collisions (the same account saved many times, or a repeated generic title
-    like Instagram's default "Original audio") are resolved separately by
-    _unique_path, which appends " (2)", " (3)" - so this only has to decide
-    what the *ideal* name is, not guarantee it's free.
+    Video: just the account. Licensed audio: just the title - real song titles
+    are already distinct. Original-sound audio: account + title, because
+    Instagram's generic default title ("Original audio") repeats across
+    hundreds of accounts and the account name is what actually distinguishes
+    them once there's no per-account folder to do that job.
+
+    Collisions still possible within one account (several sounds that are all
+    literally "Original audio") are resolved separately by _unique_path, which
+    appends " (2)", " (3)" - so this only has to decide the *ideal* name.
     """
     if mode == "audio":
-        return _safe_name(meta.get("audio_title"), NAME_LIMIT) or "Untitled"
+        title = _safe_name(meta.get("audio_title"), NAME_LIMIT) or "Untitled"
+        if meta.get("audio_kind") == "original":
+            account = _safe_name(meta.get("audio_artist") or meta.get("owner"), 40) or "unknown"
+            return f"{account} - {title}"[:NAME_LIMIT].strip(" .-")
+        return title
     return _safe_name(meta.get("owner"), NAME_LIMIT) or "unknown"
 
 
-def audio_destination(kind: str, artist: str) -> str:
+def audio_destination(kind: str, artist: str = "") -> str:
     """Classification folder for an audio download, relative to downloads/.
 
-    audio/Original Sounds/<account>/ for creator-made sounds, grouped by the
-    account that made them; audio/Licensed Music/<artist>/ for catalog tracks,
-    grouped by the recording artist. The artist column already holds whichever
-    is right for the kind, so one function covers both.
+    Just the two-way split: audio/Original Sounds/ for creator-made sounds,
+    audio/Licensed Music/ for catalog tracks - no per-account or per-artist
+    subfolder. `artist` isn't used for the folder any more, but the parameter
+    stays so call sites don't need to change if that ever comes back.
     """
     bucket = "Original Sounds" if kind == "original" else "Licensed Music"
-    who = _safe_name(artist, 40) or "Unknown artist"
-    return f"audio/{bucket}/{who}"
+    return f"audio/{bucket}"
 
 
 def _unique_path(directory: Path, base: str, suffix: str) -> Path:
